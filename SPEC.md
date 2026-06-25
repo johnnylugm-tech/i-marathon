@@ -16,6 +16,35 @@
 接下來，SQS 將觸發具備高度彈性擴展能力的運算服務（如 AWS Lambda），啟動核心的影像處理與人工智慧管線。Lambda 函數會呼叫預先訓練好的邊緣或雲端物件偵測模型（如 YOLOv8 或 RF-DETR），精確進行跑者身軀與號碼布的邊界框（Bounding Box）定位，隨後交由 OCR 引擎提取字元2。辨識成功後，影像將傳遞至基於 Node.js 的 Sharp 影像處理模組，進行浮水印、濾鏡與賽事數據的動態疊加渲染10。  
 最終的社群發布與展現層，系統會依據辨識出的跑者身分，查詢關聯的 OAuth 授權權杖（Access Tokens），並調用對應的平台 API（如 Meta Graph API、Threads API、LINE Messaging API），執行非同步的媒體上傳與貼文發布任務，完成端到端（End-to-End）的全自動化資料流12。
 
+### **2.5 資料儲存層設計**
+
+本系統採用混合儲存策略：關聯式資料庫儲存結構化業務資料，NoSQL 資料庫儲存高併發寫入之臨時性處理狀態，物件儲存服務持久化影像資產。
+
+| 資料類型 | 儲存服務 | 說明 |
+| :---- | :---- | :---- |
+| **跑者註冊資料** | Amazon DynamoDB | 主要 Key 為賽事 ID (Partition Key) + 跑者號碼布編號 (Sort Key)，屬性包含姓名、OAuth Token 加密 blob、Face Re-ID 授權狀態、PDPA 同意時間戳 |
+| **OAuth Token** | DynamoDB + AWS KMS | Token 狀態（有效/已撤銷/已過期）、加密後之 Access/Refresh Token、AES-256-GCM 加密 blob（由 KMS CMK 保護）、最近刷新時間 |
+| **照片處理任務狀態** | DynamoDB (GSI) | 任務 ID、S3 URI、處理階段（pending/detected/ocr/fallback/published/failed）、跑者 ID、最終狀態更新時間 |
+| **DLQ 任務** | DynamoDB | DLQ 任務 ID、所屬賽事、原始 S3 URI、失敗原因、retry 次數、人工確認狀態 |
+| **賽事資料** | Amazon RDS (PostgreSQL) | 賽事名稱、日期、賽道點位座標、參賽人數上限、贊助商設定、PDF 模板 ID |
+| **原始與處理後影像** | Amazon S3 | 原始上傳（原始大圖）、處理後（美化壓縮圖）、LINE 推播圖（縮圖）、PDF 成品 |
+
+**KMS 金鑰管理政策：**每次賽事部署時產生新的 CMK（Customer Master Key），用於該賽事之 Token 加密；CMK 啟用日 + 90 天自動排程刪除，確保歷史 Token 無法被新金鑰解密而須重新授權。金鑰存取由 IAM Policy 控制，Lambda 執行角色僅有 `kms:Decrypt` 權限，無 `kms:GenerateDataKey` 以外之金鑰管理權限。
+
+### **2.6 多租戶隔離策略**
+
+本系統支援「同一套系統同時服務多場賽事」，以帳號資料隔離為核心設計原則：
+
+- **網路層級：** 每場賽事之 Lambda 函數、VPC、Subnets 以賽事 ID 作為前綴，透過 AWS Resource Tag 與 IAM Condition 限制跨賽事資源存取。
+- **資料庫層級：** DynamoDB Table 以賽事 ID 作為 Partition Key，確保查詢範圍永遠限於單一賽事；RDS 以 Schema 隔離（`event_{event_id}`），避免資料洩漏。
+- **OAuth Token：** Token 嚴格绑定「賽事 ID + 跑者 ID」，跨賽事呼叫時 Token 比對會立即失敗，防止 A 賽事的照片被錯誤推播至 B 賽事跑者。
+
+| 隔離層級 | 機制 | 失效情境 |
+| :---- | :---- | :---- |
+| 網路 | IAM Condition + Resource Tag | Lambda 角色設定錯誤導致跨 partition 讀取 |
+| 資料庫 | DynamoDB Partition Key / RDS Schema | 查詢漏接 Partition Key 導致 Cross-event scan |
+| OAuth | Token 附加 event_id 聲明（JWT Claims） | Token 被盜用且攻擊者成功更換綁定 event_id |
+
 | 系統架構元件 | 採用技術與核心服務 | 核心職責與資料流向 |
 | :---- | :---- | :---- |
 | **資料獲取與攝入端** | 5G 路由器、FTP/API 腳本、UHF RFID 解碼器 | 攝影師高頻影像上傳；RFID 晶片通過時間點（JSON 陣列）推送，涵蓋 timingId 與 \`timestamp6。 |
@@ -67,6 +96,95 @@ AI 辨識流採用多階段的深度學習管線。傳統單純依賴 OCR 的作
 為實現此高度動態且排版複雜的文件生成，系統採用無伺服器環境中的 Puppeteer-core 搭配無頭瀏覽器（Headless Chromium）解決方案，捨棄了在排版彈性上較差的 PDFKit20。系統後端首先將匯集的 JSON 數據注入預先設計好的 HTML5/CSS3 樣式模板中（使用如 Pug 或 Jinja2 模板引擎）39。隨後，AWS Lambda 函數會啟動專為 Serverless 環境壓縮的輕量化 Chromium 執行檔（如 @sparticuz/chromium-min 或利用 AWS Lambda Layer 載入的 chrome-aws-lambda）20。  
 在記憶體中渲染該 HTML 頁面時，Chromium 會確保所有特殊字體（如粗體報紙標題字型）、複雜的 CSS 網格排版與外部高解析度圖片皆完美載入。為達到最佳列印效果，開發團隊將在樣式表中宣告 @media print { @page { size: A4 portrait; margin: 0; } }，確保產出的 PDF 不留白邊41。生成的 PDF 檔案將匯出為 Buffer 並自動寫入 Amazon S3 存放，隨後透過電子郵件或 LINE 訊息將預先簽名的下載連結遞送給跑者，完成賽事體驗的最後一哩路20。
 
+### **3.5 系統 API 設計**
+
+本系統之 API 分為「外部公開 API」與「內部系統 API」兩類，所有外部端點均須通過 API Gateway 並啟用 Rate Limiting 與 IAM 授權。
+
+#### **外部公開 API**
+
+| 端點 | 方法 | 說明 | 頻率限制 |
+| :---- | :---- | :---- | :---- |
+| `/api/v1/races/{eventId}/register` | POST | 跑者報名並提交號碼布編號與社群帳號綁定 | 每 IP 10 req/min |
+| `/api/v1/races/{eventId}/register/face-consent` | POST | Face Re-ID 自願授權上傳清晰自拍照 | 每跑者 1 req/event |
+| `/api/v1/races/{eventId}/runner/{bibNumber}/status` | GET | 跑者查詢自身照片處理狀態 | 每跑者 30 req/min |
+| `/api/v1/races/{eventId}/gallery?bib={bibNumber}` | GET | 圖庫搜尋：依號碼布查詢照片（降級 Fallback 模式） | 每 IP 60 req/min |
+
+**POST /api/v1/races/{eventId}/register — Request Body：**
+```json
+{
+  "bibNumber": "A1234",
+  "fullName": "王小明",
+  "email": "runner@example.com",
+  "lineUserId": "Uxxxxxxxxxxxx",
+  "instagramUsername": "runner_ig",
+  "threadsUsername": "runner_threads",
+  "facebookUid": "fb_123456",
+  "consent": {
+    "socialPush": true,
+    "faceRecognition": false,
+    "privacyPolicyVersion": "2026-v1",
+    "timestamp": "2026-06-26T04:00:00Z",
+    "ipAddress": "203.0.113.42"
+  }
+}
+```
+
+**Response（成功，201）：**
+```json
+{ "runnerId": "uuid-xxxx", "status": "registered", "message": "報名成功，請加入 LINE 官方帳號完成驗證" }
+```
+
+#### **內部系統 API（RFID 計時系統推送）**
+
+| 端點 | 方法 | 說明 |
+| :---- | :---- | :---- |
+| `/internal/v1/timing/{eventId}/checkpoint` | POST | RFID 計時系統推送晶片通過時間點 JSON 陣列 |
+| `/internal/v1/races/{eventId}/results/official` | POST | 官方成績公告觸發 PDF 生成任務 |
+
+**POST /internal/v1/timing/{eventId}/checkpoint — Request Body：**
+```json
+{
+  "readerId": "RDR-START-01",
+  "chipId": "MYLAPS-ABCD1234",
+  "timestamp": "2026-06-26T04:30:00.000Z",
+  "gpsLat": 25.0330,
+  "gpsLng": 121.5654,
+  "checkpointCode": "START"
+}
+```
+
+#### **DLQ 人工處理 API**
+
+| 端點 | 方法 | 說明 |
+| :---- | :---- | :---- |
+| `/internal/v1/dlq/{taskId}/assign` | POST | 將 DLQ 任務指派給特定人工處理員 |
+| `/internal/v1/dlq/{taskId}/resolve` | POST | 人工確認跑者身分後補充填入 bibNumber |
+
+### **3.6 OAuth Token 生命週期與刷新失敗處理**
+
+OAuth Token（Access Token + Refresh Token）之生命週期管理為系統穩定性的關鍵環節：
+
+**Token 刷新邏輯：**每張 OAuth Token 均攜帶 `expiresAt` 時間戳。Lambda 函數在執行推播前，會先檢查是否已過期或距離過期不足 10 分鐘；若符合條件則先呼叫平台 Refresh Endpoint 取得新 Token，再執行推播。刷新成功後新 Token 寫回 DynamoDB，並更新 `expiresAt`。
+
+**刷新失敗時之降級流程：**
+
+| 失敗原因 | 系統行為 |
+| :---- | :---- |
+| 用戶主動撤銷授權（401 Unauthorized from platform） | 立即更新 Token 狀態為 `revoked`，**不重試**，寫入事件日誌；如跑者有備援平台（LINE），自動切換至備援推播；無備援則標記「需重新授權」並於完賽報紙中通知 |
+| Refresh Token 過期（一般為 30–60 天） | 視同撤銷處理，同上 |
+| 平台 API 暫時性錯誤（5xx） | 指數退避重試（最多 3 次，間隔 30s/60s/120s），3 次失敗後寫入 DLQ「Token 刷新重試失敗」 |
+| 網路瞬断 | 重試 1 次，失敗即寫入 DLQ |
+
+**重新授權通知：**當 Token 狀態變更為 `needs_reauth` 時，系統透過 LINE Push Message 主動通知跑者：「您的社群授權已過期，請於 48 小時內重新授權以確保收到完賽報紙」。
+
+### **3.7 照片歸戶邏輯（Corner Cases）**
+
+**同一攝影點之連拍叢集（Photo Burst）處理：**當多位跑者在極短時間內相繼通過同一攝影點時，單一 Lambda 實例可能對同一號碼布產生多張照片。系統以「**號碼布 + 拍攝時間窗口（±3 秒）**」作為叢集鍵（Cluster Key），同一叢集內僅選擇「OCR 置信度最高」之一張照片執行推播，其餘寫入跑者個人圖庫供自行下載。
+
+**同一照片含多位跑者（集團通過）：**系統對照片內所有偵測到之候選邊界框（所有 Confidence ≥ 0.5 之 Bib Bounding Box）逐一執行 OCR 與推播；同一張照片可同時歸戶至多位跑者。為避免重複推播，系統以 `photoId + bibNumber` 複合鍵做去重檢查，已成功推播之組合不再重複發布。
+
+**DLQ 照片之人工處理 SLA：**進入 DLQ 之照片須於賽事結束後 48 小時內完成人工確認，否則於完賽報紙中以「遺珠之憾」區塊說明該照片存在但未能及時確認。
+
 ## **4\. 非功能性需求 (Non-Functional Requirements)**
 
 非功能性需求定義了系統在極端壓力下的表現與基礎設施的穩健程度。對於一項需要即時處理巨量多媒體數據與個人隱私的賽事系統而言，高併發處理能力、超低延遲的運算架構與堅若磐石的資安防護是不可或缺的三大支柱。
@@ -96,6 +214,48 @@ AI 辨識流採用多階段的深度學習管線。傳統單純依賴 OCR 的作
 | **獨立與明確同意 (Separate Consent)** | 社群自動推播之授權機制不得使用預設打勾，且須與賽事一般報名條款完全分離（Separate Declaration），確保跑者在充分知情下擁有真實的選擇權27。 |
 | **特種個人資料之處理** | 若未來擴充使用人臉特徵值比對（Biometric Data），依法將被視為高度敏感的特種個人資料，系統必須依法取得書面同意或具備同等效力的強烈電子同意憑證，並建立嚴格的存取控制24。 |
 | **資料最小化與永久抹除** | 賽事結束且專屬報紙遞送完畢後，系統應制定自動銷毀排程。依據隱私政策，必須將暫存的授權 Token 與未比對成功的原始相片從系統中永久且安全地抹除（Secure Erasure）28。 |
+
+### **4.4 監控、警示與災難復原**
+
+本系統於賽事當日須具備完整的可觀測性（Observability），以確保任何環節異常能在第一時間被发现並處置。
+
+**業務關鍵指標（Business KPIs）與監控儀表板：**
+
+| 指標 | 說明 | 警示閾值 |
+| :---- | :---- | :---- |
+| OCR 辨識成功率 | 成功取得有效 bibNumber 的照片比例 | < 70% 時觸發 P2 警示 |
+| 推播抵達率 | 成功推播至至少一個平台 / 總處理照片數 | < 80% 時觸發 P1 警示 |
+| P95 端到端延遲 | 從 S3 上傳到 LINE 推送通知的 P95 時間 | > 5 分鐘時觸發 P2 警示 |
+| Lambda 錯誤率 | 各 Lambda 函數之錯誤率（5xx / Invocation） | > 1% 時觸發 P1 警示 |
+| SQS 佇列深度 | 等待處理之訊息數量 | > 5000 時觸發 P2 警示 |
+| Token 刷新失敗率 | 刷新請求中失敗的比例 | > 5% 時觸發 P2 警示 |
+
+**CloudWatch 警示與 On-Call 政策：**賽事進行期間，on-call 工程師須於 alert 觸發後 15 分鐘內確認並開始處理。P1 alert（如 Lambda 錯誤率飆升、SQS 堆積）須於 5 分鐘內口頭回報。
+
+**災難復原（DR）策略：**
+
+| 情境 | 復原方式 | RTO | RPO |
+| :---- | :---- | :---- | :---- |
+| 單一 Lambda 函數崩潰 | SQS 自動重試（最多 3 次）+ DLQ 寫入 | < 5 分鐘 | 照片可能延遲但不遺失 |
+| DynamoDB 資料庫故障 | DynamoDB Auto Scaling + Point-in-time Recovery（PITR） | < 15 分鐘 | 最近 35 天內任意秒 |
+| S3 儲存桶意外刪除 | S3 Versioning 開啟 + Life Cycle Rule 保存版本 | < 1 小時 | 最近刪除版本可復原 |
+| AWS 主要區域（例：us-east-1）全斷 | 跨區域備份：照片預設同步至 `ap-northeast-1`（東京），RDS 讀寫副本置於 `ap-southeast-1`（新加坡） | < 4 小時 | 最近 5 分鐘資料 |
+| 賽事當日網路瞬斷（5G） | 每站攝影機本機 SSD 暫存，連線恢復後自動續傳（Resumable Upload） | 0（本地暫存） | 0（本地備份） |
+
+**On-Call Runbook：**每次賽事須備有 `oncall-runbook-{eventId}.md`，內容包含：各 Lambda 函數 ARN、錯誤率儀表板連結、DLQ 人工處理頁面 URL、AWS Support 聯絡方式、備援推播（純文字 LINE 通知）觸發條件。
+
+### **4.5 測試策略**
+
+本系統之測試分為四個層級，各層級有不同的通過標準與工具選擇：
+
+| 測試層級 | 測試標的 | 工具 | 通過標準 |
+| :---- | :---- | :---- | :---- |
+| **單元測試（Unit）** | 各 Lambda 函數業務邏輯、Adapter Pattern 各平台模組、Token 刷新邏輯、照片歸戶決策函數 | Jest / Pytest | 分支覆蓋率 ≥ 80% |
+| **整合測試（Integration）** | SQS → Lambda → DynamoDB 寫入流程、RFID API → Lambda → S3 觸發、Sharp 影像合成輸出驗證 | LocalStack + Jest/Pytest | 所有路徑 100% 通過 |
+| **AI 模型驗收測試** | OCR 辨識準確率（以獨立測試集驗證）、Face Re-ID 置信度分佈 | 獨立測試 Dataset（含雨天/夜間/號碼布遮蔽/集團通過等 Edge Case） | OCR ≥ 91.6% 準確率（依規格書目標）；Face Re-ID ≥ 85% Top-1 準確率 |
+| **端到端測試（E2E）** | 從 Mock 攝影機上傳 → S3 → SQS → Lambda → LINE Push Message 送達 | staging 環境 + LINE Debug 帳號，模擬 1000 張照片批次處理 | SLA P95 ≤ 5 分鐘達成，無錯誤 |
+
+**AI 模型訓練資料來源：**採用 Hugging Face `race-numbers-detection-and-ocr` 資料集作為基準訓練集，並於每場賽事後以實測失敗案例擴充訓練集，持續微調模型權重。模型版本以 Semantic Versioning 管理，並於 `/models/{version}/` 目錄存放每次上線前之模型 checkpoint。
 
 ## **5\. 未來擴充性考量 (Scalability)**
 
