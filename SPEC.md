@@ -58,6 +58,7 @@
 | **社群平台整合抽象層** | Adapter Pattern (工廠模式) | 統一封裝各社群平台（Instagram/Threads/LINE/Facebook 等）之 API 差異，支援未來新平台熱拔插式擴充。 |
 | **雲端基礎設施抽象層** | Provider Adapter Pattern + Terraform | 統一封裝 AWS/GCP/Azure 等雲端服務差異，支援多雲部署與雲端服務熱切換。 |
 | **AI/LLM 推論抽象層** | Adapter Pattern (工廠模式) | 統一封裝各 OCR/LLM 引擎（雲端 API / 本地部署），支援成本導向與延遲導向之引擎動態切換。 |
+| **功能開關與配置抽象層** | Feature Flag + Event Config | 每場賽事之功能開關（LINE/IG/Threads/臉部辨識）、推論引擎、AI 策略、PDF 生成等皆由集中式配置管理，支援熱切換與未來功能擴充。 |
 
 ### **2.7 外部計時與成績系統整合抽象層**
 
@@ -583,6 +584,125 @@ function createInferenceAdapter(
 4. 撰寫單元測試（Mock API 回應）與整合測試（實際呼叫引擎端點）
 
 此流程屬純水平擴充，核心 AI 管線（YOLOv8 → OCR → Face Re-ID）完全不需修改。
+
+### **2.11 功能開關與配置抽象層**
+
+每場賽事的需求、預算與技術成熟度各異。賽事主辦單位應能自由啟用或關閉特定功能，而無需重新部署程式碼。本系統定義「功能開關與配置抽象層」，以集中式配置管理所有功能的啟用狀態、參數調控與未來擴充點。
+
+#### **配置模型定義**
+
+```typescript
+// 賽事功能配置（EventFeatureConfig）
+interface EventFeatureConfig {
+  eventId: string;
+
+  // --- 社群平台推播開關 ---
+  platforms: {
+    line:    PlatformConfig;    // LINE 推播啟用/停用
+    instagram: PlatformConfig;  // Instagram 推播啟用/停用
+    threads: PlatformConfig;    // Threads 推播啟用/停用
+    facebook: PlatformConfig;   // Facebook 推播啟用/停用（預設關閉）
+    x:        PlatformConfig;   // X (Twitter) 推播啟用/停用（預設關閉）
+    bluesky:  PlatformConfig;  // Bluesky 推播啟用/停用（預設關閉）
+  };
+
+  // --- AI 辨識功能開關 ---
+  ai: {
+    ocrEnabled: boolean;                    // 號碼布 OCR 啟用
+    faceReIdEnabled: boolean;              // Face Re-ID Fallback 啟用（須用戶另行同意）
+    inferenceEngine: string;               // 推論引擎策略（見 2.10）
+    inferenceStrategy: InferenceStrategy;   // cost_optimized / latency_optimized / privacy_first / accuracy_first
+    confidenceThreshold: number;           // OCR 置信度閾值（預設 0.7）
+    faceReIdConfidenceThreshold: number;   // Face Re-ID 置信度閾值（預設 0.75）
+    cascadeFallback: CascadeConfig;        // 級聯降級設定
+  };
+
+  // --- 照片美化與渲染 ---
+  rendering: {
+    watermarkEnabled: boolean;             // 浮水印啟用
+    sponsorFrameEnabled: boolean;         // 贊助商相框啟用
+    paceOverlayEnabled: boolean;          // 配速文字疊加啟用
+    bibNumberOverlayEnabled: boolean;    // 號碼布數字疊加啟用
+    filterStyle: 'none' | 'vintage' | 'cinematic' | 'custom'; // 相片濾鏡風格
+  };
+
+  // --- 完賽報紙 ---
+  newspaper: {
+    enabled: boolean;                     // 完賽報紙生成啟用
+    templateId: string;                  // PDF 模板 ID
+    includeSplitsChart: boolean;        // 包含分段配速圖表
+    includeSocialMetrics: boolean;      // 包含社群互動指標
+    deliveryDelayMinutes: number;       // 賽後多少分鐘後開始生成（預設 30）
+  };
+
+  // --- DLQ 處理 ---
+  dlq: {
+    enabled: boolean;                    // DLQ 功能啟用
+    autoEmailNotification: boolean;     // DLQ 累積超標時自動通知主辦單位
+    autoEmailThreshold: number;         // 觸發通知的 DLQ 數量閾值（預設 100）
+  };
+
+  // --- 延遲 SLA ---
+  sla: {
+    targetP95Minutes: number;           // 目標 P95 延遲（分鐘），預設 5
+    hardCapMinutes: number;            // 困難場景最大容忍時間（分鐘），預設 15
+  };
+
+  // --- 擴充區段（未来功能在此新增）---
+  extensions: Record<string, unknown>;
+}
+```
+
+#### **Feature Flag 管理機制**
+
+系統採用 AWS AppConfig（或同類型 Feature Flag 服務）作為 Feature Flag 的集中管理後端，支援：
+
+- **即時熱切換（Real-time）：**  flag 變更後，Lambda 函數在 30 秒內感知，無需重新部署
+- **分段放量（Gradual Rollout）：**  新功能可先對 1% 流量啟用，逐步擴大至 100%
+- **Targeting Rules：** 可依據跑者區域、參賽組別、號碼布範圍等條件，針對特定族群啟用功能
+- **Audit Log：** 所有 flag 變更皆寫入 CloudTrail，具備時間戳、操作者、變更前後值
+
+#### **預設功能目錄**
+
+以下為目前已實作之功能開關，未來新增功能皆依相同模式擴充：
+
+| 功能代碼 | 功能名稱 | 預設狀態 | 說明 |
+| :---- | :---- | :---- | :---- |
+| `PLATFORM_LINE` | LINE 推播 | ✅ 開啟 | 標配平台 |
+| `PLATFORM_INSTAGRAM` | Instagram 推播 | ✅ 開啟 | 標配平台 |
+| `PLATFORM_THREADS` | Threads 推播 | ✅ 開啟 | 標配平台 |
+| `PLATFORM_FACEBOOK` | Facebook 推播 | ❌ 關閉 | 須主動啟用 |
+| `PLATFORM_X` | X (Twitter) 推播 | ❌ 關閉 | 須主動啟用 |
+| `AI_OCR` | 號碼布 OCR 辨識 | ✅ 開啟 | 無法關閉（為核心功能） |
+| `AI_FACE_REID` | Face Re-ID Fallback | ✅ 開啟 | 須用戶另行同意（PDPA） |
+| `RENDER_WATERMARK` | 浮水印疊加 | ✅ 開啟 | 可上傳自訂浮水印 |
+| `RENDER_SPONSOR_FRAME` | 贊助商相框 | ✅ 開啟 | |
+| `RENDER_PACE_OVERLAY` | 配速文字疊加 | ✅ 開啟 | |
+| `RENDER_FILTER` | 相片濾鏡風格 | ❌ 關閉 | 須主動啟用 |
+| `NEWSPAPER_ENABLED` | 完賽報紙生成 | ✅ 開啟 | |
+| `NEWSPAPER_SPLITS_CHART` | 完賽報紙含分段圖表 | ✅ 開啟 | |
+| `NEWSPAPER_SOCIAL_METRICS` | 完賽報紙含社群指標 | ❌ 關閉 | 須主動啟用 |
+| `DLQ_ENABLED` | DLQ 人工處理機制 | ✅ 開啟 | |
+| `DLQ_AUTO_EMAIL` | DLQ 超標自動通知 | ✅ 開啟 | |
+
+#### **擴充點：未來功能接入流程**
+
+未來任何新功能或新平台支援，均須依以下流程接入 Feature Flag 系統，確保可被主辦單位動態控制：
+
+1. **定義 Feature Flag 代碼：** 於 `feature-flags.ts` 枚舉中新增 `{FEATURE_NAME}`，並填入 `defaultValue`（預設狀態）
+2. **實作功能開關護衛（Guard）：** 在 Lambda 函數中，以 `AppConfig.evaluate(ruleId, flagKey)` 包圍功能邏輯；flag 為 `false` 時跳過該功能
+3. **註冊至 Feature Flag 管理後台：** 後台管理系統之「功能開關」頁面自動讀取所有已註冊 flag，以 Toggle Switch 形式呈現，並附功能說明
+4. **寫入監控指標：** 每個 flag 變更時，寫入 CloudWatch 自訂指標 `feature_flag_active_{flagKey}`，供 SLA 報告追蹤各功能的實際使用率
+5. **列入 Release Notes：** 每次新增 flag 須同步更新後台 Release Notes 頁面，說明新功能用途與預設狀態
+
+#### **後台配置 API**
+
+| 端點 | 方法 | 說明 |
+| :---- | :---- | :---- |
+| `/admin/v1/events/{eventId}/config` | GET | 取得該賽事完整功能配置 |
+| `/admin/v1/events/{eventId}/config` | PATCH | 部分更新功能配置（僅變更傳入的欄位，支援熱切換） |
+| `/admin/v1/events/{eventId}/config/features` | GET | 列出所有可用功能開關與目前狀態 |
+| `/admin/v1/feature-flags` | GET | 列出系統全部 Feature Flag（含已停用之歷史 flag） |
 
 ## **3\. 功能性需求 (Functional Requirements)**
 
