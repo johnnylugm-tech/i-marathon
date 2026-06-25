@@ -55,6 +55,7 @@
 | **影像與文件動態渲染** | Sharp (Node.js via Lambda Layer), Puppeteer-core | 高效能記憶體內合成相框、疊加配速數據、修復 EXIF 翻轉；無頭瀏覽器生成專屬 PDF 完賽報紙18。 |
 | **社群 API 整合模組** | OAuth 2.0, Meta Graph API, LINE Messaging API | 權杖生命週期管理與加密、多段式媒體容器上傳、API 頻率限制（Rate Limit）控制與退避策略13。 |
 | **外部計時系統整合抽象層** | Adapter Pattern (工廠模式) | 統一封裝各賽事計時系統（MyLaps/ChampionChip/RaceEntry/TimingMatrix）之 API 差異，向下游提供一致的標準化資料模型。 |
+| **社群平台整合抽象層** | Adapter Pattern (工廠模式) | 統一封裝各社群平台（Instagram/Threads/LINE/Facebook 等）之 API 差異，支援未來新平台熱拔插式擴充。 |
 
 ### **2.7 外部計時與成績系統整合抽象層**
 
@@ -178,6 +179,134 @@ function createTimingAdapter(
 4. 撰寫 Adapter 單元測試（Mock 外部系統 API 回應）與整合測試（實際呼叫外部測試環境）
 
 此流程無需觸及核心 AI 處理、推播邏輯或資料庫 Schema，確保新增系統支援為水平擴充而非修改核心。
+
+### **2.8 社群平台整合抽象層**
+
+本系統透過「社群平台整合抽象層」將各社群平台之 OAuth 流程、API 規範、媒體格式限制與 Rate Limit 差異完全隔離。核心推播引擎僅依賴標準化的內部介面，新增平台無需修改推播引擎本身，僅需實作對應之 Adapter。
+
+#### **標準化內部推播介面**
+
+核心推播引擎僅依賴以下標準化介面：
+
+```typescript
+// 標準化推播任務（Normalized Publish Task）
+interface NormalizedPublishTask {
+  runnerId: string;
+  platform: string;             // 標準化平台識別碼，如 "instagram", "threads", "line", "facebook"
+  mediaType: 'image' | 'video' | 'carousel';
+  primaryImageS3Uri: string;   // S3 URI of the processed/beautified image
+  thumbnailS3Uri?: string;     // S3 URI of thumbnail (required for LINE)
+  captionText: string;         // 平台無關之標準化文案，Adapter 依平台規範進行截斷/格式化
+  hashtags?: string[];         // 標準化標籤列表，Adapter 依平台限制處理
+  deepLinkUrl?: string;        // 點擊追蹤用 deep link
+  metadata: {
+    eventId: string;
+    bibNumber: string;
+    checkpointCode: string;
+    publishedAt?: string;
+  };
+}
+
+// 標準化推播結果（Normalized Publish Result）
+interface NormalizedPublishResult {
+  taskId: string;
+  platform: string;
+  status: 'published' | 'failed' | 'rate_limited' | 'token_revoked';
+  externalPostId?: string;     // 平台返回之貼文 ID
+  externalPostUrl?: string;   // 平台返回之貼文永久連結
+  publishedAt: string;
+  errorCode?: string;
+  errorMessage?: string;
+}
+```
+
+#### **Adapter 實作矩陣**
+
+| 平台 | API 類型 | OAuth 流程 | 媒體限制 | 推播方式 | 支援狀態 |
+| :---- | :---- | :---- | :---- | :---- | :---- |
+| **LINE** | LINE Messaging API | LINE Login | PNG/JPG, 必須同時提供原圖+縮圖 | Push Message (後續推播) | ✅ P0（標配） |
+| **Instagram** | Instagram Graph API | Facebook OAuth 2.0 | 僅 JPEG, 8MB, 4:5–1.91:1 | Content Publishing API（兩階段） | ✅ P0（標配） |
+| **Threads** | Threads API | Facebook OAuth 2.0 | PNG/JPG, 8MB, 9:16 或 4:5 | POST Media + Publish | ✅ P0（標配） |
+| **Facebook** | Facebook Graph API | Facebook OAuth 2.0 | PNG/JPG/GIF, 8MB | Photo Upload API | ✅ P1（支援） |
+| **X (Twitter)** | X API v2 | OAuth 2.0 (PKCE) | PNG/JPG/GIF, 5MB | Media Upload + Tweet | ✅ P1（支援） |
+| **Bluesky** | AT Protocol | OAuth 2.0 with Bluesky | PNG/JPG, 1MB (未驗證帳號) / 5MB | Bluesky API (repo/createRecord) | ✅ P2（支援） |
+| **TikTok** | TikTok API | OAuth 2.0 | PNG/JPG, ≤ 10MB | Content Posting API | ✅ P2（支援） |
+| **Pinterest** | Pinterest API | OAuth 2.0 | PNG/JPG, ≤ 10MB | Pins API | ✅ P2（支援） |
+| **Weibo** | Weibo API | OAuth 2.0 | PNG/JPG, ≤ 5MB | Statuses API | ✅ P2（未來擴充） |
+| **小紅書** | 小紅書 API | OAuth 2.0 (企業號) | PNG/JPG, ≤ 10MB | Note API | ✅ P2（未來擴充） |
+
+#### **社群平台 Adapter 介面定義**
+
+```typescript
+interface ISocialPlatformAdapter {
+  /** 平台識別碼（如 "instagram", "threads", "line"） */
+  readonly platform: string;
+
+  /**
+   * 發送媒體貼文至平台。
+   * @param task 標準化推播任務（來自核心推播引擎）
+   * @param runnerConfig 跑者於本系統註冊時授權之平台特定設定（如 LINE User ID、Instagram Business Account ID）
+   * @param credentials 該跑者之 OAuth Access Token（已由 Token Manager 解密）
+   */
+  publish(task: NormalizedPublishTask, runnerConfig: RunnerPlatformConfig, credentials: PlatformCredentials): Promise<NormalizedPublishResult>;
+
+  /**
+   * 處理平台專屬之 Rate Limit 回應（429 Too Many Requests）。
+   * 回傳下次可重試之時間戳（Retry-After header），或拋出已耗盡例外。
+   */
+  handleRateLimit(error: PlatformApiError, retryCount: number): Promise<Date>;
+
+  /**
+   * 處理 Token 失效（401 Unauthorized / 403 Forbidden）。
+   * 回傳 Token 狀態（revoked / expired / valid），並主動呼叫 Token Manager 更新狀態。
+   */
+  handleAuthFailure(error: PlatformApiError): Promise<TokenStatus>;
+
+  /**
+   * 驗證 Adapter 與平台連線是否正常（健康檢查）。
+   * 賽事啟用前、後台管理員可觸發確認設定正確。
+   */
+  healthCheck(credentials: PlatformCredentials): Promise<{ ok: boolean; message: string }>;
+
+  /**
+   * 將標準化 captionText + hashtags 格式化為平台專屬格式。
+   * 例：LINE 不支援 Hashtag（需轉為文字），Threads 支援 500 字主文。
+   */
+  formatPostText(captionText: string, hashtags: string[]): string;
+}
+```
+
+#### **Token 生命週期管理器（Token Manager）**
+
+Token Manager 為所有 Adapter 共享之元件，負責：
+
+- **加密儲存：** OAuth Access Token 與 Refresh Token 以 AES-256-GCM 加密存於 DynamoDB，CMK 由 AWS KMS 管理
+- **滑動刷新：** Access Token 距離過期 < 10 分鐘時自動以 Refresh Token 刷新；刷新成功後寫回 DB 並更新 `expiresAt`
+- **狀態追蹤：** Token 狀態（`active` / `needs_reauth` / `revoked`）寫入專用 DynamoDB 表，Adapter `handleAuthFailure` 依此判斷是否終止推播
+- **跨平台綁定：** 單一跑者可授權多個平台（LINE + Instagram + Threads），Token Manager 維護 `{runnerId}_{platform}` 複合鍵，確保跨平台 Token 獨立管理
+
+#### **推播引擎工作流程**
+
+核心推播引擎完全不感知平台差異，流程如下：
+
+1. AI 處理完成後，產生 `NormalizedPublishTask`
+2. 引擎依 `task.platform` 呼叫 `SocialPlatformFactory.createAdapter(platform)`
+3. Adapter 查 Token Manager 取得 `credentials`（已解密之 Access Token）
+4. Adapter 呼叫平台 API，處理 Rate Limit 與 Token 失效
+5. 結果以 `NormalizedPublishResult` 回傳，引擎寫入 DynamoDB 任務狀態
+6. 若 `status === 'failed'`，引擎依失敗原因重試（Token 失效則寫入 DLQ「Token 失效」子類型）
+
+#### **新增平台支援流程**
+
+未來新增社群平台支援時，開發流程為：
+
+1. 於 `social-adapters/` 目錄下新增 `{platform}.adapter.ts`，實作 `ISocialPlatformAdapter` 介面
+2. 向工廠函數 `SocialPlatformFactory.createAdapter` 新增 `platform` 映射
+3. 向後台管理系統之「支援平台」設定頁面新增該平台開關（預設關閉）
+4. 賽事主辦單位於後台填入新平台之 App Credentials（App ID / Secret / OAuth Redirect URI）
+5. 撰寫 Adapter 單元測試（Mock 平台 API）與 E2E 測試（使用平台測試帳號）
+
+此流程為純水平擴充，核心推播引擎、Lambda 函數與資料庫 Schema 完全不受影響。
 
 ## **3\. 功能性需求 (Functional Requirements)**
 
