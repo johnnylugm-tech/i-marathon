@@ -11,7 +11,7 @@
 ## **2\. 系統架構與資料流 (System Architecture & Data Flow)**
 
 為確保系統在數萬名跑者同時參賽、數十位專業攝影師密集上傳高畫質影像的極端負載下，仍能維持毫秒至秒級的低延遲與系統高可用性，本系統採用基於雲端原生（Cloud-Native）的事件驅動無伺服器架構（Event-Driven Serverless Architecture）2。整體的拓樸結構被精密劃分為四個主要層級：資料獲取與攝入層、非同步串流緩衝與處理層、人工智慧推論與渲染層，以及社群發布與展現層。  
-在資料獲取層中，賽道沿線的專業攝影設備透過 5G 路由器或專線網路，將高解析度影像即時且持續地推送到雲端物件儲存空間（如 Amazon S3）3。本系統採用賽道定點攝影模式：賽前公告固定攝影點位，跑者預期在已知位置獲得拍攝服務。賽事主辦單位將提供攝影師完善硬體設施（5G 熱點、供電、遮陽/遮雨帳篷），確保上傳穩定性3。同步地，位於起終點與各個分段檢查點的 RFID 計時系統（例如 MyLaps 系統或搭載 UHF 被動式 RFID 天線的讀取器），會捕捉跑者鞋面或號碼布上的晶片數據4。這些硬體設備或其對應的中介軟體（Middleware）會將包含讀取器 ID、晶片 ID、GPS 經緯度以及世界協調時間（UTC）時間戳記等欄位的 JSON 陣列，透過 HTTPS POST 請求傳送至本系統的計時 API 閘道器7。  
+在資料獲取層中，賽道沿線的專業攝影設備透過 5G 路由器或專線網路，將高解析度影像即時且持續地推送到雲端物件儲存空間（如 Amazon S3）3。本系統採用賽道定點攝影模式：賽前公告固定攝影點位，跑者預期在已知位置獲得拍攝服務。賽事主辦單位將提供攝影師完善硬體設施（5G 熱點、供電、遮陽/遮雨帳篷），確保上傳穩定性3。同步地，位於起終點與各個分段檢查點的 RFID 計時系統（例如 MyLaps 系統或搭載 UHF 被動式 RFID 天線的讀取器），會捕捉跑者鞋面或號碼布上的晶片數據4。本系統透過「外部計時系統整合抽象層」之 Adapter Pattern 接收資料（詳見 2.7 章節），以統一的內部資料模型隔離各系統 API 差異，無論計時系統供應商為 MyLaps、ChampionChip、RaceEntry 或其他，均能無差異地流入下游處理管線。  
 當影像檔案寫入 S3 儲存體時，會立即觸發 S3 事件通知機制，將該影像的處理任務物件推入 Amazon SQS（Simple Queue Service）訊息佇列中3。引入 SQS 作為非同步與佇列點對點處理（Queued point-to-point processing）的關鍵在於解耦與削峰填谷；它允許下游的無伺服器運算單元以自身的最佳節奏擷取任務，避免瞬間的巨量影像上傳壓垮後端運算資源與資料庫連線3。  
 接下來，SQS 將觸發具備高度彈性擴展能力的運算服務（如 AWS Lambda），啟動核心的影像處理與人工智慧管線。Lambda 函數會呼叫預先訓練好的邊緣或雲端物件偵測模型（如 YOLOv8 或 RF-DETR），精確進行跑者身軀與號碼布的邊界框（Bounding Box）定位，隨後交由 OCR 引擎提取字元2。辨識成功後，影像將傳遞至基於 Node.js 的 Sharp 影像處理模組，進行浮水印、濾鏡與賽事數據的動態疊加渲染10。  
 最終的社群發布與展現層，系統會依據辨識出的跑者身分，查詢關聯的 OAuth 授權權杖（Access Tokens），並調用對應的平台 API（如 Meta Graph API、Threads API、LINE Messaging API），執行非同步的媒體上傳與貼文發布任務，完成端到端（End-to-End）的全自動化資料流12。
@@ -54,6 +54,130 @@
 | **AI 視覺辨識引擎** | YOLOv8 / RF-DETR 搭配特徵金字塔網路, Gemini API | 跑者身軀框選追蹤、號碼布精確定位與變形幾何校正、高精準度光學字元提取2。 |
 | **影像與文件動態渲染** | Sharp (Node.js via Lambda Layer), Puppeteer-core | 高效能記憶體內合成相框、疊加配速數據、修復 EXIF 翻轉；無頭瀏覽器生成專屬 PDF 完賽報紙18。 |
 | **社群 API 整合模組** | OAuth 2.0, Meta Graph API, LINE Messaging API | 權杖生命週期管理與加密、多段式媒體容器上傳、API 頻率限制（Rate Limit）控制與退避策略13。 |
+| **外部計時系統整合抽象層** | Adapter Pattern (工廠模式) | 統一封裝各賽事計時系統（MyLaps/ChampionChip/RaceEntry/TimingMatrix）之 API 差異，向下游提供一致的標準化資料模型。 |
+
+### **2.7 外部計時與成績系統整合抽象層**
+
+各賽事主辦單位所採用之晶片計時系統、成績系統與跑者資訊來源各異。本系統定義「外部整合抽象層」，以標準化的內部資料模型隔離所有外部系統差異，確保新增賽事支援時無需修改核心處理邏輯。
+
+#### **標準化內部資料模型**
+
+下游 AI 處理與排版系統僅依賴以下標準化資料模型，不直接耦合任何外部系統：
+
+```typescript
+// 標準晶片過站紀錄（Normalized Chip Passage Record）
+interface NormalizedCheckpointRecord {
+  eventId: string;
+  chipId: string;           // 晶片唯一識別碼（與 bibNumber 不同）
+  bibNumber: string;        // 號碼布編號（由 adapter 查表或 OCR 交叉比對取得）
+  checkpointCode: string;    // 檢查點代碼（如 "START", "KM25", "FINISH"）
+  timestamp: string;        // ISO 8601 UTC 時間戳
+  gpsLat?: number;          // 選用：含 GPS 時提供
+  gpsLng?: number;          // 選用：含 GPS 時提供
+  sourceSystem: string;     // 來源系統名稱（如 "mylaps", "championchip"），僅供日誌用
+}
+
+// 標準成績紀錄（Normalized Official Result）
+interface NormalizedOfficialResult {
+  eventId: string;
+  bibNumber: string;
+  chipId: string;
+  fullName: string;
+  gender?: string;
+  age?: number;
+  category?: string;        // 參賽組別
+  officialTime: string;     // 正式成績（HH:MM:SS）
+  chipTime?: string;       // 晶片計時成績
+  splits: {
+    checkpointCode: string;
+    splitTime: string;      // 區間時間
+    cumulativeTime: string; // 累計時間
+  }[];
+  rankOverall?: number;     // 總排名
+  rankCategory?: number;    // 組別排名
+}
+```
+
+#### **Adapter 實作矩陣**
+
+每個外部系統需實作對應之 Adapter，將其原生 API Output 轉換為上述標準模型。以下為規劃支援之主要系統與其差異說明：
+
+| 外部系統 | 晶片類型 | API 形式 | 特殊欄位 | 預計 Adapter 優先順序 |
+| :---- | :---- | :---- | :---- | :---- |
+| **MyLaps** | UHF RFID（紙片式/鞋帶式） | REST API (XML/JSON) | `decoderId`, `passTime`, `BibTagID` | P0（最高） |
+| **ChampionChip** | UHF RFID | FTP CSV 匯出 或 REST API | `chip_code`, `gun_time`, `net_time` | P0 |
+| **RaceEntry** | UHF RFID | REST API (JSON) | `participant_id`, `split_times[]` | P1 |
+| **TimingMatrix** | UHF RFID / 計時晶片 | Webhook POST | `reader_id`, `bib`, `time` | P1 |
+| **IPICO** | UHF RFID | SOAP / REST API | `athleteID`, `splitID`, `matID` | P2 |
+| **Active Network** | 晶片+號碼布整合 | REST API | `bibNumber`, `gunTime`, `chipTime` | P2 |
+| **CPS（香港/澳門常用）** | UHF RFID | FTP CSV | `ChipID`, `CheckpointID`, `ReadTime` | P2 |
+
+#### **Adapter 介面定義**
+
+所有 Adapter 須實作以下統一介面（以 TypeScript 為例）：
+
+```typescript
+interface ITimingSystemAdapter {
+  /** 系統類型識別碼（如 "mylaps", "championchip"） */
+  readonly systemType: string;
+
+  /**
+   * 將外部系統原生晶片過站資料，轉換為標準化晶片過站紀錄。
+   * @param rawPayload 外部系統 POST/GET 之原始 payload（型別依系統而異）
+   * @param eventConfig 賽事特定設定（如 API Key、端點 URL、Mapping Table）
+   */
+  normalizeCheckpoint(rawPayload: unknown, eventConfig: EventTimingConfig): NormalizedCheckpointRecord[];
+
+  /**
+   * 將外部系統成績 API 結果，轉換為標準化成績紀錄。
+   * @param officialResultRaw 外部成績系統原始輸出
+   */
+  normalizeOfficialResult(officialResultRaw: unknown, eventConfig: EventTimingConfig): NormalizedOfficialResult[];
+
+  /**
+   * 驗證 Adapter 與外部系統連線是否正常（健康檢查）。
+   * 賽事啟用前、後台管理員可觸發此方法確認設定正確。
+   */
+  healthCheck(eventConfig: EventTimingConfig): Promise<{ ok: boolean; message: string }>;
+}
+```
+
+#### **Adapter 工廠與動態路由**
+
+系統於賽事初始化時，依據 `EventTimingConfig.adapterType` 欄位，由工廠函數（Factory Function）動態實例化對應 Adapter：
+
+```typescript
+function createTimingAdapter(
+  adapterType: string,
+  eventConfig: EventTimingConfig
+): ITimingSystemAdapter {
+  const adapterMap: Record<string, new (config: EventTimingConfig) => ITimingSystemAdapter> = {
+    'mylaps': MyLapsAdapter,
+    'championchip': ChampionChipAdapter,
+    'raceentry': RaceEntryAdapter,
+    'timingmatrix': TimingMatrixAdapter,
+    // 未來擴充：直接在此新增映射
+  };
+  const AdapterClass = adapterMap[adapterType];
+  if (!AdapterClass) throw new Error(`Unsupported timing adapter: ${adapterType}`);
+  return new AdapterClass(eventConfig);
+}
+```
+
+#### **晶片號碼布交叉查詢（Chip-to-Bib Mapping）**
+
+部分系統以晶片 ID（chipId）為主要索引，而非 bibNumber。Adapter 須支援「晶片 ID → 號碼布」之查詢表，由賽事主辦單位於後台 CSV 匯入。此查詢表為 `chipId → bibNumber` Key-Value 對，儲存於 DynamoDB，Adapter 在 `normalizeCheckpoint` 執行過程中即時查表填入 `bibNumber`。
+
+#### **新增賽事支援流程**
+
+未來新增 Adapter 支援新計時系統時，開發流程為：
+
+1. 於 `adapters/` 目錄下新增 `{systemName}.adapter.ts`，實作 `ITimingSystemAdapter` 介面
+2. 向工廠函數 `createTimingAdapter` 新增 `adapterType` 映射
+3. 於後台管理系統之「計時系統設定」下拉選單中新增該系統選項
+4. 撰寫 Adapter 單元測試（Mock 外部系統 API 回應）與整合測試（實際呼叫外部測試環境）
+
+此流程無需觸及核心 AI 處理、推播邏輯或資料庫 Schema，確保新增系統支援為水平擴充而非修改核心。
 
 ## **3\. 功能性需求 (Functional Requirements)**
 
