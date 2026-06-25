@@ -56,6 +56,7 @@
 | **社群 API 整合模組** | OAuth 2.0, Meta Graph API, LINE Messaging API | 權杖生命週期管理與加密、多段式媒體容器上傳、API 頻率限制（Rate Limit）控制與退避策略13。 |
 | **外部計時系統整合抽象層** | Adapter Pattern (工廠模式) | 統一封裝各賽事計時系統（MyLaps/ChampionChip/RaceEntry/TimingMatrix）之 API 差異，向下游提供一致的標準化資料模型。 |
 | **社群平台整合抽象層** | Adapter Pattern (工廠模式) | 統一封裝各社群平台（Instagram/Threads/LINE/Facebook 等）之 API 差異，支援未來新平台熱拔插式擴充。 |
+| **雲端基礎設施抽象層** | Provider Adapter Pattern + Terraform | 統一封裝 AWS/GCP/Azure 等雲端服務差異，支援多雲部署與雲端服務熱切換。 |
 
 ### **2.7 外部計時與成績系統整合抽象層**
 
@@ -307,6 +308,137 @@ Token Manager 為所有 Adapter 共享之元件，負責：
 5. 撰寫 Adapter 單元測試（Mock 平台 API）與 E2E 測試（使用平台測試帳號）
 
 此流程為純水平擴充，核心推播引擎、Lambda 函數與資料庫 Schema 完全不受影響。
+
+### **2.9 雲端基礎設施抽象層**
+
+本系統並非僅部署於 AWS，賽事主辦單位可能已有其他雲端供應商之既有資源，或因資料落地（Data Residency）法規要求須使用特定區域之雲端服務。本系統定義「雲端基礎設施抽象層」，將核心業務邏輯與底層雲端服務解耦，支援在 AWS、GCP、Azure 之間無縫遷移或同時使用多雲架構。
+
+#### **核心抽象元件**
+
+本系統之業務邏輯依賴以下幾類雲端服務，抽象層為每一類定義標準化介面：
+
+| 服務類別 | AWS 預設 | GCP 對應 | Azure 對應 |
+| :---- | :---- | :---- | :---- |
+| **物件儲存** | Amazon S3 | Cloud Storage (GCS) | Azure Blob Storage |
+| **無伺服器運算** | AWS Lambda | Cloud Functions / Cloud Run | Azure Functions |
+| **訊息佇列** | Amazon SQS | Cloud Tasks / Pub/Sub | Azure Queue Storage |
+| ** NoSQL 資料庫** | Amazon DynamoDB | Firestore / Cloud Datastore | Azure Cosmos DB |
+| **關聯式資料庫** | Amazon RDS (PostgreSQL) | Cloud SQL | Azure Database for PostgreSQL |
+| **金鑰管理** | AWS KMS | Cloud KMS | Azure Key Vault |
+| **CDN / 邊緣快取** | Amazon CloudFront | Cloud CDN | Azure CDN |
+| **AI/ML 推論** | AWS SageMaker / Bedrock | Vertex AI | Azure AI Studio |
+| **容器登錄** | Amazon ECR | Artifact Registry | Azure Container Registry |
+| **基礎設施即程式** | AWS CDK / Terraform | Terraform / Deployment Manager | Terraform / Bicep |
+
+#### **標準化基礎設施介面**
+
+```typescript
+// 標準化儲存抽象（IStorageAdapter）
+interface IStorageAdapter {
+  readonly provider: 'aws' | 'gcp' | 'azure';
+  upload(key: string, body: Buffer, options?: UploadOptions): Promise<string>; // 回傳公開存取 URL 或 S3 URI
+  download(key: string): Promise<Buffer>;
+  delete(key: string): Promise<void>;
+  generatePresignedUrl(key: string, expiresInSeconds: number): Promise<string>;
+}
+
+// 標準化無伺服器函數抽象（IComputeAdapter）
+interface IComputeAdapter {
+  readonly provider: 'aws' | 'gcp' | 'azure';
+  invoke(functionName: string, payload: unknown): Promise<unknown>;
+  setEventSource(functionName: string, triggerConfig: TriggerConfig): void;
+  setConcurrency(functionName: string, concurrency: number): void;
+}
+
+// 標準化訊息佇列抽象（IQueueAdapter）
+interface IQueueAdapter {
+  readonly provider: 'aws' | 'gcp' | 'azure';
+  enqueue(queueName: string, message: unknown): Promise<void>;
+  dequeue(queueName: string, batchSize: number): Promise<QueueMessage[]>;
+  acknowledge(queueName: string, receiptHandle: string): Promise<void>;
+  deadLetter(queueName: string, message: unknown, errorReason: string): Promise<void>;
+}
+
+// 標準化 NoSQL 資料庫抽象（IDatabaseAdapter）
+interface IDatabaseAdapter {
+  readonly provider: 'aws' | 'gcp' | 'azure';
+  put(table: string, item: Record<string, unknown>): Promise<void>;
+  get(table: string, key: Record<string, string>): Promise<Record<string, unknown> | null>;
+  query(table: string, indexName: string, keyCondition: Record<string, unknown>): Promise<Record<string, unknown>[]>;
+  update(table: string, key: Record<string, string>, updates: Record<string, unknown>): Promise<void>;
+}
+```
+
+#### **Provider 工廠與動態路由**
+
+所有 Adapter 均透過工廠函數依據部署時的 `CLOUD_PROVIDER` 環境變數（`aws` / `gcp` / `azure`）動態實例化：
+
+```typescript
+function createStorageAdapter(provider: string): IStorageAdapter {
+  const map = {
+    'aws': () => new S3StorageAdapter(),
+    'gcp': () => new GCSStorageAdapter(),
+    'azure': () => new AzureBlobStorageAdapter(),
+  };
+  return (map[provider] ?? map['aws'])();
+}
+
+function createQueueAdapter(provider: string): IQueueAdapter {
+  const map = {
+    'aws': () => new SQSQueueAdapter(),
+    'gcp': () => new CloudTasksQueueAdapter(),
+    'azure': () => new AzureQueueAdapter(),
+  };
+  return (map[provider] ?? map['aws'])();
+}
+```
+
+#### **基礎設施即程式（IaC）跨雲支援**
+
+基礎設施所有資源皆以 Terraform 宣告式定義，確保跨雲部署可重現。模組結構如下：
+
+```
+infrastructure/
+├── modules/
+│   ├── storage/           # S3 / GCS / Azure Blob 通用介面模組
+│   ├── compute/           # Lambda / Cloud Functions / Azure Functions 通用介面模組
+│   ├── queue/             # SQS / Cloud Tasks / Azure Queue 通用介面模組
+│   ├── database/          # DynamoDB / Firestore / Cosmos DB 通用介面模組
+│   └── iam/              # IAM / Cloud IAM / Azure AD 角色對應模組
+├── environments/
+│   ├── aws/              # AWS 特定 provider + region 設定
+│   ├── gcp/              # GCP 特定 provider + project 設定
+│   └── azure/            # Azure 特定 provider + subscription 設定
+└── main.tf               # 根層級 Module 組合
+```
+
+每個 `modules/` 子目錄接收 Provider 無關之參數，內部依 `var.provider` 條件式呼叫對應雲端資源，確保同一份 Terraform 程式碼可部署至三個雲端。
+
+#### **AI 模型部署抽象**
+
+AI 推論（YOLOv8 / RF-DETR / SnapSeek）之模型檔案存放於物件儲存，模型執行環境之差異由 Adapter 隔離：
+
+```typescript
+interface IAIModelAdapter {
+  readonly provider: 'aws' | 'gcp' | 'azure';
+  loadModel(modelKey: string): Promise<void>;     // 載入模型至記憶體
+  infer(input: Buffer): Promise<ModelOutput>;     // 執行推論
+  getModelMetadata(modelKey: string): ModelMetadata;
+}
+```
+
+#### **跨雲遷移流程**
+
+當賽事主辦單位需要將系統從 AWS 遷移至 GCP 或 Azure 時，流程如下：
+
+1. 於新雲端供應商之帳號下執行 `terraform apply`
+2. 將 S3 上的模型檔案與照片資料遷移至新雲端之物件儲存
+3. 將 DynamoDB 資料以 CSV 格式匯出，寫入新 NoSQL 資料庫
+4. 變更 `CLOUD_PROVIDER` 環境變數，切換至新雲端 Adapter
+5. 執行 Smoke Test 驗證所有核心功能正常運作
+6. 確認無誤後，關閉舊雲端帳號下所有資源
+
+此過程中，業務邏輯（Lambda 函數程式碼、AI 模型參數、Adapter 實作）完全不需要修改。
 
 ## **3\. 功能性需求 (Functional Requirements)**
 
