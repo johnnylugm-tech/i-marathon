@@ -51,12 +51,13 @@
 | **雲端儲存與事件觸發** | Amazon S3、S3 Event Notifications | 原始高畫質影像持久化儲存，自動觸發非同步的影像建立事件3。 |
 | **訊息緩衝與流量調節** | Amazon SQS (Standard 佇列) | 影像處理任務非同步排程，內建重試機制與死信佇列（DLQ），防止大流量突發造成的處理遺漏3。 |
 | **無伺服器運算與編排** | AWS Lambda (Node.js/Python 執行環境) | 執行核心業務邏輯、協調 AI 模型推論、進行資料庫 I/O 操作與處理社群 API 調用15。 |
-| **AI 視覺辨識引擎** | YOLOv8 / RF-DETR 搭配特徵金字塔網路, Gemini API | 跑者身軀框選追蹤、號碼布精確定位與變形幾何校正、高精準度光學字元提取2。 |
+| **AI 視覺辨識引擎** | YOLOv8 / RF-DETR 搭配特徵金字塔網路 | 跑者身軀框選追蹤、號碼布精確定位與變形幾何校正；實際 OCR/LLM 推論引擎由 2.10 AI/LLM 抽象層決定2。 |
 | **影像與文件動態渲染** | Sharp (Node.js via Lambda Layer), Puppeteer-core | 高效能記憶體內合成相框、疊加配速數據、修復 EXIF 翻轉；無頭瀏覽器生成專屬 PDF 完賽報紙18。 |
 | **社群 API 整合模組** | OAuth 2.0, Meta Graph API, LINE Messaging API | 權杖生命週期管理與加密、多段式媒體容器上傳、API 頻率限制（Rate Limit）控制與退避策略13。 |
 | **外部計時系統整合抽象層** | Adapter Pattern (工廠模式) | 統一封裝各賽事計時系統（MyLaps/ChampionChip/RaceEntry/TimingMatrix）之 API 差異，向下游提供一致的標準化資料模型。 |
 | **社群平台整合抽象層** | Adapter Pattern (工廠模式) | 統一封裝各社群平台（Instagram/Threads/LINE/Facebook 等）之 API 差異，支援未來新平台熱拔插式擴充。 |
 | **雲端基礎設施抽象層** | Provider Adapter Pattern + Terraform | 統一封裝 AWS/GCP/Azure 等雲端服務差異，支援多雲部署與雲端服務熱切換。 |
+| **AI/LLM 推論抽象層** | Adapter Pattern (工廠模式) | 統一封裝各 OCR/LLM 引擎（雲端 API / 本地部署），支援成本導向與延遲導向之引擎動態切換。 |
 
 ### **2.7 外部計時與成績系統整合抽象層**
 
@@ -440,6 +441,149 @@ interface IAIModelAdapter {
 
 此過程中，業務邏輯（Lambda 函數程式碼、AI 模型參數、Adapter 實作）完全不需要修改。
 
+### **2.10 AI/LLM 推論抽象層**
+
+本系統之 AI 視覺辨識管線（跑者身軀偵測、號碼布定位、OCR 字元萃取、Face Re-ID）並非寫死特定模型或供應商，而是透過「AI/LLM 推論抽象層」動態選擇最適合當下場景的推論引擎。此設計讓賽事主辦單位能依據成本、延遲、準確率與資料隱私需求，在不同推論引擎之間切換；同時支援本地部署開源模型（如 Ollama/LLaMA、LLaVA），以降低雲端 API 費用。
+
+#### **推論引擎矩陣**
+
+| 推論引擎 | 類型 | 部署方式 | 適用場景 | 成本模型 | 優先順序 |
+| :---- | :---- | :---- | :---- | :---- | :---- |
+| **Gemini API** (Google) | 雲端 API | SaaS（遠端呼叫） | 高精度號碼布 OCR、多語言支援 | 按 Token/按圖收費 | P0（預設） |
+| **GPT-4o Vision** (OpenAI) | 雲端 API | SaaS（遠端呼叫） | 高精度號碼布 OCR、多語言支援 | 按 Token/按圖收費 | P0 |
+| **Claude 3.5 Sonnet** (Anthropic) | 雲端 API | SaaS（遠端呼叫） | 號碼布 OCR，含推理過渡解釋 | 按 Token/按圖收費 | P1 |
+| **AWS Bedrock** (Claude/Llava) | 雲端 API（託管） | AWS 原生 | AWS 既有帳單整合，適合已用 AWS 的主辦方 | 按用量收費（AWS 帳單） | P1 |
+| **Azure OpenAI** (GPT-4V) | 雲端 API | Azure 原生 | 已用 Azure 的企業主辦方 | Azure 帳單整合 | P1 |
+| **YOLOv8 + Tesseract OCR** | 本地模型 | 自架伺服器 / Lambda Layer | 追求低延遲、無 API 費用、高隱私（資料不離地） | 一次性模型授權 + GPU 硬體 | P1 |
+| **RF-DETR** | 本地模型 | 自架伺服器 / Lambda Layer | 高精度物件偵測，替代 YOLOv8 | 開源模型（Apache 2.0） | P2 |
+| **Ollama + LLaVA / LLaMA-OCR** | 本地 LLM | 自架 GPU 伺服器 或 高記憶體 Lambda | 極度成本敏感、須資料落地（不允許影像上雲）之賽事 | 硬體電力成本，無 API 費用 | P2 |
+| **vLLM + Qwen2-VL** | 本地 VLM | 自架 GPU 伺服器 | 大規模部署、對延遲和吞吐量有嚴格要求 | 開源模型，GPU 成本 | P2 |
+
+#### **標準化推論介面**
+
+```typescript
+// OCR 推論結果（Provider 無關）
+interface OCRResult {
+  bibNumber: string | null;      // 萃取出的號碼布數字，無法辨識時為 null
+  confidence: number;             // 0.0–1.0 置信度
+  boundingBox: BoundingBox;       // 號碼布在原圖中的邊界框座標
+  processingTimeMs: number;       // 推論耗時（毫秒），用於成本分析
+  provider: string;               // 實際使用之推論引擎（如 "gemini-1.5-flash"），僅供日誌
+}
+
+// 人臉比對結果（Provider 無關）
+interface FaceMatchResult {
+  matched: boolean;
+  confidence: number;             // 0.0–1.0
+  processingTimeMs: number;
+  provider: string;
+}
+
+// 號碼布偵測結果
+interface BibDetectionResult {
+  detections: {
+    bibCrop: Buffer;              // 裁切後之號碼布圖片區塊（傳給 OCR 使用）
+    boundingBox: BoundingBox;
+    confidence: number;
+  }[];
+  processingTimeMs: number;
+  provider: string;
+}
+
+// AI/LLM 推論抽象層核心介面
+interface IInferenceAdapter {
+  /** 引擎識別碼 */
+  readonly engine: string;
+
+  /**
+   * 執行號碼布偵測（物件偵測階段）。
+   * @param imageBuffer 原始圖片 Buffer（JPEG/PNG）
+   */
+  detectBib(imageBuffer: Buffer): Promise<BibDetectionResult>;
+
+  /**
+   * 執行 OCR（字元萃取階段）。
+   * @param bibCrop 裁切後之號碼布圖片區塊
+   */
+  extractBibNumber(bibCrop: Buffer): Promise<OCRResult>;
+
+  /**
+   * 執行人臉比對（Fallback 階段）。
+   * @param faceCrop 裁切後之人臉圖片區塊
+   * @param registeredSelfie 跑者註冊時上傳之清晰自拍照
+   */
+  matchFace(faceCrop: Buffer, registeredSelfie: Buffer): Promise<FaceMatchResult>;
+
+  /**
+   * 健康檢查：驗證 API 連線 / 本地模型是否正常。
+   */
+  healthCheck(): Promise<{ ok: boolean; latencyMs: number; message: string }>;
+
+  /**
+   * 取得目前推論引擎的估算單張處理成本（USD）。
+   * 用於成本監控與引擎選擇參考。
+   */
+  estimateCostPerImage(): number;
+}
+```
+
+#### **工廠與引擎選擇策略**
+
+```typescript
+function createInferenceAdapter(
+  strategy: 'cost_optimized' | 'latency_optimized' | 'privacy_first' | 'accuracy_first' | string,
+  eventConfig: EventConfig
+): IInferenceAdapter {
+  const engineMap: Record<string, IInferenceAdapter> = {
+    // 成本優先：本地 Tesseract OCR，無 API 費用
+    'cost_optimized':       new LocalYoloTesseractAdapter(),
+    // 隱私優先：嚴格資料落地，完全不呼叫外部 API
+    'privacy_first':        new OllamaLLaVAAdapter(),
+    // 延遲優先：雲端低延遲 API
+    'latency_optimized':    new GeminiFlashAdapter(),
+    // 精度優先：最大最強模型
+    'accuracy_first':       new ClaudeSonnetAdapter(),
+  };
+
+  // 可在 eventConfig 中指定明確引擎覆寫（後台可設定）
+  if (eventConfig.inferenceEngineOverride) {
+    return new ExplicitEngineAdapter(eventConfig.inferenceEngineOverride);
+  }
+
+  return engineMap[strategy] ?? engineMap['cost_optimized'];
+}
+```
+
+#### **多引擎級聯降級（Cascade Fallback）**
+
+為同時滿足 SLA 延遲目標與成本控制，系統支援「多引擎級聯降級」策略：
+
+1. **第一階段（≤ 30 秒）：** 嘗試本地 YOLOv8 + Tesseract OCR（免費、低延遲）
+2. **第一階段失敗（置信度 < 0.5）或超時：** 切換至 Gemini Flash API（低成本雲端 OCR）
+3. **第二階段仍失敗（置信度 < 0.7）：** 升級至 Claude 3.5 Sonnet（高精度推理）
+4. **最終失敗：** 寫入 DLQ「AI 推論耗盡」，通知人工處理
+
+每個階段的 `maxRetries`、`timeoutMs`、`fallbackOnConfidence` 皆由 `eventConfig.inferenceStrategy` 參數化控制。
+
+#### **本地部署模型的管理**
+
+若賽事主辦單位選擇「隱私優先」或「成本優先」策略，需在機房或本地 GPU 伺服器部署 Ollama 或 vLLM。模型管理由以下機制支撐：
+
+- **模型註冊表（Model Registry）：** DynamoDB 儲存 `{modelKey, modelVersion, sha256, deployedAt, status}`，每次部署前核對 SHA-256 防篡改
+- **藍綠部署（Blue/Green）：** 新模型驗證通過後，透過 Feature Flag 逐步切換流量，避免一次性全量上線
+- **模型監控：** 每個推理請求寫入 CloudWatch，記錄 `engine`、`latencyMs`、`confidence`、`costEstimate`，供成本分析與 SLA 報告使用
+
+#### **新增推論引擎流程**
+
+未來新增推論引擎時，開發流程為：
+
+1. 於 `inference-adapters/` 目錄下新增 `{engineName}.adapter.ts`，實作 `IInferenceAdapter` 介面
+2. 向工廠函數 `createInferenceAdapter` 新增策略映射
+3. 於後台管理系統之「AI 推論引擎設定」頁面新增該引擎選項（可設定為賽事專用）
+4. 撰寫單元測試（Mock API 回應）與整合測試（實際呼叫引擎端點）
+
+此流程屬純水平擴充，核心 AI 管線（YOLOv8 → OCR → Face Re-ID）完全不需修改。
+
 ## **3\. 功能性需求 (Functional Requirements)**
 
 本系統的業務邏輯高度複雜且具備多樣性，涵蓋從賽前的合規註冊與授權、賽中極高頻率的 AI 運算，到賽果客製化媒體產出的完整生命週期。以下針對五大核心功能進行深度的架構與實作需求解析。
@@ -456,7 +600,7 @@ interface IAIModelAdapter {
 ### **3.2 即時影像處理與辨識流：邊緣到雲端的 AI 協同與極速渲染**
 
 賽事期間的影像處理要求極致的低延遲與極高的準確率。當攝影師按下快門後，影像將透過內建 FTP 或 API 上傳功能的相機，搭配 5G 網路直接推送到指定的雲端 S3 儲存貯列。此舉將觸發 SQS 佇列訊息，進而喚醒 AWS Lambda 函數進行非同步的初步處理8。  
-AI 辨識流採用多階段的深度學習管線。傳統單純依賴 OCR 的作法在賽道複雜背景、隨意變換角度與惡劣氣候中極易崩潰1。因此，本系統首先調用基於 YOLO 架構（如 YOLOv8 或專為伺服器端優化的 RF-DETR）的先進物件偵測模型2。該模型經過包含多種光影條件、跑者姿態與複雜背景（In-the-wild benchmark datasets）的專屬賽事資料集進行微調（Fine-tuning），能迅速在百萬像素的影像中框選出「跑者身軀」，接著再進一步於身軀範圍內定位出「號碼布」的精確邊界框（Bounding Box）29。定位完成後，系統會對號碼布區域進行幾何校正與形態學操作（Morphological Operations），將傾斜或皺褶的區域拉平，最後再將處理後的高對比區塊送入 OCR 引擎提取精確的數字序列2。此種結合特徵金字塔網路（Feature Pyramid Network）與卷積注意力機制（Convolutional Block Attention Module）的方法，能有效排除環境雜訊，將號碼布辨識準確率提升至高達 91.6% 以上的商業標準2。
+AI 辨識流採用多階段的深度學習管線，並透過 AI/LLM 推論抽象層（見 2.10 章節）動態選擇推論引擎2。本系統首先調用 YOLO 架構（如 YOLOv8 或 RF-DETR）的物件偵測模型進行號碼布定位2。該模型經過包含多種光影條件、跑者姿態與複雜背景（In-the-wild benchmark datasets）的專屬賽事資料集進行微調（Fine-tuning），能迅速在百萬像素的影像中框選出「跑者身軀」，接著再進一步於身軀範圍內定位出「號碼布」的精確邊界框（Bounding Box）29。定位完成後，系統會對號碼布區域進行幾何校正與形態學操作（Morphological Operations），將傾斜或皺褶的區域拉平，最後再將處理後的高對比區塊送入 OCR 引擎提取精確的數字序列2。此種結合特徵金字塔網路（Feature Pyramid Network）與卷積注意力機制（Convolutional Block Attention Module）的方法，能有效排除環境雜訊，將號碼布辨識準確率提升至高達 91.6% 以上的商業標準2。
 
 當 OCR 引擎回傳之置信度分數（Confidence Score）低於预设阈值時（例如低於 0.7），系統將自動觸發**號碼布 OCR 失敗的容錯回退機制（Fallback Mechanism）**：以 YOLOv8/RF-DETR 偵測並裁切跑者臉部區塊，调用 SnapSeek 架構之人脸比对引擎，與跑者於註冊時自願上傳之清晰自拍照进行空间几何特征比对（需跑者於註冊時另行授權），以多模態融合（Multi-modal）方式提升恶劣环境下的身份对接成功率。若 Face Re-ID 置信度同樣低於阈值，該照片標記為「待人工確認」，寫入 DLQ 由賽事方進行後續處理。  
 辨識成功並與資料庫比對無誤後，系統隨即進入「動態美化處理」階段。此階段同樣於無伺服器環境中執行，主要利用建置於 Lambda Layer 上的高效能 Node.js 影像處理模組 Sharp 來完成10。數位相機拍攝的原始圖片通常包含 EXIF 旋轉元數據，若不加以處理，合成後的影像可能會呈現倒置；因此，Sharp 會首先呼叫 .rotate() 方法進行 EXIF 自動翻轉校正18。接著，系統會根據賽事主辦方的設定，利用 .composite() 方法動態疊加帶有透明度（Alpha Channel）的 PNG 賽事專屬相框與活動贊助商浮水印18。此外，系統可即時查詢該跑者通過該點位的 RFID 晶片配速與經過時間，並利用文字渲染功能將其實時繪製於相片角落。Sharp 函式庫底層運用 libvips，能在極低的記憶體消耗與毫秒級的時間內完成高品質的影像合成，確保 Lambda 函數不會因超時（Timeout）或記憶體不足而中斷10。
