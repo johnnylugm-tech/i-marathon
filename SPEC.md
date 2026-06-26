@@ -40,6 +40,24 @@
 - **S-5 (嚴重):** pushMaxPerEvent 註解加（叢集 dedup 後）+ §4.8 計算公式對照
 - **S-6 (嚴重):** 本 §0 文件關係章節（proposal.md reference-only 標記）
 
+### **0.4 待決議問題（Open Questions，v1.5 新增）**
+
+本節列出**目前尚未定案、需後續討論**之設計決策。每一項應於下次 Sprint Planning 前由 Product Owner + Tech Lead 共同決議；決議後應從本表移除並補入對應章節之正式規範。
+
+| # | 問題 | 影響章節 | 建議方向 | 預計決議時間 |
+|:----|:----|:----|:----|:----|
+| OQ-1 | Threads 250 限流常數是否抽為 `EventFeatureConfig.publishing.threadsHardLimitPer24h` config field（v1.5 §2.8 L634 + §3.9 L2302 兩處引用）？ | §2.8 / §3.9 | 抽為 config field（建議） | v1.5 sprint 2 |
+| OQ-2 | 是否引入 cold start 預算重算（M-9，§4.2 F-3 patch 後 cold start budget table 須重算）？ | §4.2 | 重算並更新 Provisioned Concurrency 配置 | v1.5 sprint 1 |
+| OQ-3 | AWS Lambda 計價單位於不同 region 是否一致？§4.8 算式重算（M-3）以 `ap-northeast-1` 為基準，是否需補 `ap-southeast-1` 對照？ | §4.8 | 補 DR region 對照表 | v1.5 sprint 3 |
+| OQ-4 | §5.4 短影音是否真要共用 `publish-queue`（M-8 結論）？或應該分離？需 spike 驗證 message payload size（影片 metadata 較大）對 SQS 256KB 限制的影響 | §5.4 | 待 spike | v2.0 前 |
+| OQ-5 | Cluster Key 是否需強制 `bibNumber` 字元集限制為 `[A-Za-z0-9-]`（m-3）？由報名表單驗證還是後端 sanitize？ | §3.7 | 報名表單前端驗證 + 後端 Zod schema 雙重把關 | v1.5 sprint 1 |
+| OQ-6 | §2.11 全目錄彙總（M-7）是否納入 release tooling 自動生成？目前手動維護易漏 | §2.11 | 從 `EventFeatureConfig` TypeScript 定義自動產出 markdown 表格 | v1.6 |
+
+**Open Questions 流程規範：**
+- 新增問題：於下次 audit 或 PR review 時主動加入
+- 移除問題：決議後移除，並於對應章節補入正式規範
+- 升級為 Finding：若發現影響實作正確性（例如 OQ-2 cold start 預算錯誤），升級為 spec audit finding
+
 ---
 
 ## **1\. 專案概述 (Project Overview) & 核心價值**
@@ -229,6 +247,14 @@ Lambda 執行角色**不具備**任何金鑰管理類權限：`kms:CreateKey`、
 | `runner-event-index` | PK: `eventId`, SK: `bibNumber` | 查詢特定賽事之跑者資料（by bibNumber） |
 | `line-user-index` | PK: `lineUserId`, SK: `eventId` | 依 LINE User ID 查詢跑者綁定（§3.5 LINE Webhook follow 事件流程用） |
 
+**GSI 命名規範（v1.5 補充）：** 本系統所有 DynamoDB GSI 統一採用 `<entity>-<attribute>-index` 三段 kebab-case 命名：
+- **entity**: 索引主體（runner / dlq / task / line 等實體名）
+- **attribute**: 索引鍵屬性（platform / status / event / user 等）
+- **index**: 固定後綴
+
+> **附註：** §3.6 OAuth Token 表新增之 3 個 GSI（`platform-user-index`、`status-expiry-index`、`event-status-index`，詳見 §3.6）遵循相同規範；Terraform/CDK 程式碼應以 `gsi-` 前綴作為 IaC 內部識別（如 `aws_dynamodb_table.runner.gsi["runner-platform-index"]`），但實際 GSI 物理名稱不帶前綴以維持 AWS Console 可讀性。
+
+**GSI 投影（Projection）策略：** 所有 GSI 預設投影模式為 `KEYS_ONLY`（僅投影 PK + SK），降低儲存成本與寫入放大效應。`task-status-index` 例外：採 `INCLUDE` 模式並投影 `status`、`updatedAt`、`checkpointCode` 三個屬性，供後台 DLQ 處理面板（§3.8）直接查詢狀態而無須回主表 fetch。`platform-user-index`（§3.6 OAuth Token 表）採 `INCLUDE` 模式投影 `platformUserId` 與 `eventId`，供 §3.5 LINE Webhook follow 事件快速反查綁定關係。
 **GSI 投影（Projection）策略：** 所有 GSI 預設投影模式為 `KEYS_ONLY`（僅投影 PK + SK），降低儲存成本與寫入放大效應。`task-status-index` 例外：採 `INCLUDE` 模式並投影 `status`、`updatedAt`、`checkpointCode` 三個屬性，供後台 DLQ 處理面板（§3.8）直接查詢狀態而無須回主表 fetch。
 
 所有 GSI 寫入時維持 Strong Consistency，讀取支援最終一致性（應用於監控儀表板等非即時場景）。
@@ -1143,6 +1169,44 @@ interface EventFeatureConfig {
 | `/admin/v1/events/{eventId}/config/features` | GET | 列出所有可用功能開關與目前狀態 |
 | `/admin/v1/feature-flags` | GET | 列出系統全部 Feature Flag（含已停用之歷史 flag） |
 
+#### **§2.11 Feature Flag 全目錄彙總（v1.5 新增）**
+
+本章節列出之 flag 為「系統定義目錄」（canonical set）。各章節新增之 flag 應於本表補登，避免散落於各章節。
+
+| # | 功能代碼 | 章節 | 預設狀態 | 用途 |
+|:----|:----|:----|:----|:----|
+| 1 | `PLATFORM_LINE` | §2.11 | ✅ 開啟 | LINE 推播標配 |
+| 2 | `PLATFORM_INSTAGRAM` | §2.11 | ✅ 開啟 | Instagram 推播標配 |
+| 3 | `PLATFORM_THREADS` | §2.11 | ✅ 開啟 | Threads 推播標配 |
+| 4 | `PLATFORM_FACEBOOK` | §2.11 | ❌ 關閉 | Facebook 推播 |
+| 5 | `PLATFORM_X` | §2.11 | ❌ 關閉 | X (Twitter) 推播 |
+| 6 | `AI_OCR` | §2.11 | ✅ 開啟（核心，無法關閉） | 號碼布 OCR |
+| 7 | `AI_FACE_REID` | §2.11 | ✅ 開啟（須用戶同意） | Face Re-ID Fallback |
+| 8 | `RENDER_WATERMARK` | §2.11 | ✅ 開啟 | 浮水印 |
+| 9 | `RENDER_SPONSOR_FRAME` | §2.11 | ✅ 開啟 | 贊助商相框 |
+| 10 | `RENDER_PACE_OVERLAY` | §2.11 | ✅ 開啟 | 配速文字疊加 |
+| 11 | `RENDER_FILTER` | §2.11 | ❌ 關閉 | 相片濾鏡 |
+| 12 | `NEWSPAPER_ENABLED` | §2.11 | ✅ 開啟 | 完賽報紙生成 |
+| 13 | `NEWSPAPER_SPLITS_CHART` | §2.11 | ✅ 開啟 | 報紙含分段圖 |
+| 14 | `NEWSPAPER_SOCIAL_METRICS` | §2.11 | ❌ 關閉 | 報紙含社群指標 |
+| 15 | `DLQ_ENABLED` | §2.11 | ✅ 開啟 | DLQ 機制 |
+| 16 | `PHOTO_BURST_DEDUP` | §2.11 | ✅ 開啟 | 連拍叢集去重 |
+| 17 | `GROUP_PHOTO_DEDUP` | §2.11 | ✅ 開啟 | 集團通過去重 |
+| 18 | `DLQ_AUTO_EMAIL` | §2.11 | ✅ 開啟 | DLQ 超標通知 |
+| 19 | `INSTAGRAM_STORY_TEMPLATE` | §2.11 / §3.3 | ❌ 關閉 | IG 限動模板包 |
+| 20 | `AESTHETIC_SCORING_ENABLED` | §2.11 / §3.7 | ❌ 關閉 | 美學評分模型 |
+| 21 | `EVENT_BADGE_SYSTEM` | §2.11 | ❌ 關閉 | 賽事挑戰徽章 |
+| 22 | `SISTER_GROUP_NOTIFY` | §2.11 | ❌ 關閉 | 姊妹群組通知 |
+| 23 | `POST_PUSH_WITHDRAWAL_WINDOW` | §3.1.Y | ✅ 開啟 | 推播後撤回視窗 |
+| 24 | `PUSH_PREVIEW_DUAL_CONSENT` | §3.1.Y | ✅ 開啟 | 推播雙重確認 |
+| 25 | `PLATFORM_FALLBACK_CHAIN` | §3.9 | ✅ 開啟 | 平台降級鏈 |
+| 26 | `META_APP_REVIEW_STATUS` | §3.9 | ✅ 開啟 | Meta App Review 監控 |
+| 27 | `THREADS_RATE_LIMIT_BUFFER` | §3.9 | ✅ 開啟 | Threads 限流緩衝 |
+| 28 | `MULTI_ACCOUNT_PUBLISH` | §3.9 | ❌ 關閉 | 多帳號分散推播 |
+| 29 | `GALLERY_FALLBACK_ALWAYS` | §3.9 | ✅ 開啟 | Gallery 永久降級 |
+
+**Flag 變更流程（v1.5 補充）：** 未來新增 flag 時，請同步更新本表與對應章節之定義表格，避免出現「章節有但本表無」或反之的不一致狀態。命名規範：`SCREAMING_SNAKE_CASE`，前綴分類為 `PLATFORM_*` / `AI_*` / `RENDER_*` / `NEWSPAPER_*` / `DLQ_*`。
+
 ### **2.12 共用型別定義（Shared Type Definitions）**
 
 本節集中定義規格書各章節所引用之共用型別，確保實作時無歧義。
@@ -1638,6 +1702,17 @@ Photo Processing Lambda 完成美化處理後，將 `NormalizedPublishTask` JSON
 
 Token 生命週期管理與刷新失敗處理，請參見 §3.6。
 
+**§3.3 IG 限動模板 vs §3.7 Cluster Dedup 執行順序（v1.5 補充）：**
+
+兩者看似目標衝突（IG 模板要「多樣化」，Cluster dedup 要「單一最佳」），實際上是**不同階段的不同決策**，由以下順序串接：
+
+1. **§3.7 Cluster Dedup 先執行**：對同一跑者同一攝影點的多張候選照片，依 `PHOTO_BURST_DEDUP` + `AESTHETIC_SCORING_ENABLED` Feature Flag 選出 1 張入推播佇列；其餘照片僅入 Gallery。
+2. **§3.3 IG 限動模板後執行**：被選出的那 1 張照片，於推播時依跑者報名時選定的 2-3 個偏好模板，自動生成對應的 2-3 個 ready-to-share 限動版本推播至 IG。
+
+> **關鍵差異：** §3.7 是「從多張候選中選 1 張」，§3.3 是「對選中的 1 張做 N 種格式變化」。N ≤ 12（INSTAGRAM_STORY_TEMPLATE 啟用時），預設 N = 1（未啟用）。
+
+**實作注意事項：** 跑者於註冊頁選定的「2-3 個偏好模板」為**主推播模板**；INSTAGRAM_STORY_TEMPLATE 啟用後，系統會額外生成其他模板作為 Gallery 預覽（非主動推播），供跑者手動分享。
+
 #### **IG 限動自動模板包（Feature Flag: INSTAGRAM_STORY_TEMPLATE）**
 
 當 `INSTAGRAM_STORY_TEMPLATE` 啟用時，系統於推播前額外產生 Ready-to-Share 限動圖片。跑者於報名時從 12 種女性向設計模板中選擇 2–3 個偏好（櫻花漸層、馬卡龍、雜誌封面風、晨曦暖色、賽道速度感等）。系統依跑者選擇自動套用對應模板，生成 9:16 垂直格式圖片，自動裁切為 Instagram 限動尺寸（1080×1920），並疊加配速、完賽時間、賽事 Logo 與跑者姓名。同一張原始照片針對不同平台輸出最佳構圖版本（ Threads 4:5、 LINE 16:9 等），由推播引擎依平台自動選擇適合的預生成模板圖。
@@ -1790,6 +1865,8 @@ interface IdempotencyRecord {
 
 #### **OAuth 授權回調與跑者自助 API**
 
+**URL 命名規範（v1.5 統一）：** 本系統所有對外 endpoint URL 一律使用 `*.{eventId}.imarathon.app` 子域名格式（與 §3.1 前端 Hosting 規格一致），**不再使用 `api.example.com` placeholder**。OAuth Callback 端點因此為 `https://api.{eventId}.imarathon.app/api/v1/oauth/callback/{platform}`，其中 `{eventId}` 與 `register.{eventId}.imarathon.app` 等前端子域名共享同一賽事命名空間。
+
 | 端點 | 方法 | 說明 | 頻率限制 |
 | :---- | :---- | :---- | :---- |
 | `/api/v1/oauth/callback/{platform}` | GET | OAuth 授權回調端點，接收 authorization code 並換取 Token | N/A（由平台觸發） |
@@ -1799,7 +1876,7 @@ interface IdempotencyRecord {
 所有 OAuth 授權流程（含 LINE Login、Meta Graph API、Threads）均使用 `state` 參數防止 CSRF 攻擊，並攜帶 runner 識別資訊。Callback URL 格式如下：
 
 ```
-https://api.example.com/api/v1/oauth/callback/{platform}?code={authorization_code}&state={base64url_json}
+https://api.{eventId}.imarathon.app/api/v1/oauth/callback/{platform}?code={authorization_code}&state={base64url_json}
 ```
 
 其中 `state` 參數為 Base64URL 編碼的 JSON，格式如下：
@@ -2172,6 +2249,13 @@ interface OAuthTokenGSI {
 - **拍立得場景 8000–10000ms（±8–10 秒）** — 拍立得輸出慢,需拉長等待
 
 叢集鍵組成：`{eventId}#{bibNumber}#{stationId}#{floor(capturedAt / burstClusterWindowMs)}`，由 Photo Processing Lambda 計算後內存比對（無需 DynamoDB round-trip）。
+
+**叢集鍵分隔符安全性說明（v1.5 補充）：** 叢集鍵使用 `#` 作為分隔符，需注意以下 DynamoDB 約束：
+- DynamoDB Sort Key 長度上限 **2048 bytes**；本叢集鍵最壞情況長度估算：`eventId(64) + bibNumber(16) + stationId(32) + timestampFloor(13) + 3個'#'` = **125 bytes**，遠低於上限。
+- `#` 在 DynamoDB Sort Key 中為合法字元（ASCII 0x23），無特殊語意（不像 DynamoDB 預留的 `#` 在某些 query 操作中）。
+- **衝突風險：** 若 `bibNumber` 或 `stationId` 本身可包含 `#` 字元（如某些賽事允許客製化號碼布含 `#`），會導致叢集鍵解析錯誤。**規範：** `bibNumber` 與 `stationId` 應限制為 `[A-Za-z0-9-]` 字元集；若無法保證，叢集鍵應改用 length-prefixed 編碼（如 `JSON.stringify(parts).length#JSON.stringify(parts)`）或 Base64URL 編碼後再 hash。
+
+**單一叢集去重複合鍵：** `photoId + bibNumber` 用於防止同一照片重複推播給同一跑者（§3.7 集團通過場景），採 `#` 分隔；與叢集鍵共用相同字元限制。
 
 叢集內選圖策略（由 Feature Flag 控制）：
 - **`PHOTO_BURST_DEDUP` 關閉：** 所有照片均執行推播（不退而求其次）。
@@ -2620,6 +2704,15 @@ interface MetaAppReviewChecklist {
 - 20K 賽事單日 8 小時：Photo Proc 20 × $0.0000041/GB-s × 1GB × 28800s = ~$2.36;PDF 10 × $0.0000041 × 2GB × 28800s = ~$2.36;其餘忽略。合計 < $10/賽事日。
 - 平日時段（無賽事）以 EventBridge Schedule 自動將 Provisioned Concurrency 降為 0,僅保留 Reserved Concurrency 上限避免 cold start。
 
+**Cold Start 全局聲明 vs 個別函數對照（v1.5 補充）：**
+
+| 項目 | 全局聲明（§4.2 開頭） | 個別函數（上方表格） | 差異原因 |
+|:----|:----|:----|:----|
+| 未暖機 Cold Start 範圍 | 5–15 秒 | Photo Proc 5-10s / Face Re-ID 3-5s / Publish 1-2s / **PDF 8-15s** | 全局 5-15s 為「多數 AI/業務 Lambda」之代表值；PDF Generation Lambda 因包含 Headless Chromium 啟動（~50 MB binary 解壓縮），實際冷啟動更長 |
+| 影響層級 | 整體 SLA 計算用 | Provisioned Concurrency 配置決策用 | 全局數字納入延遲預算表（§4.2）；個別數字決定 Provisioned Concurrency 應配置多少（冷啟動越長，PC 越多） |
+
+**配置策略：** PDF Generation Lambda 因冷啟動 8-15s 對 P95 SLA（5 分鐘）影響最大，故配置最高 Provisioned Concurrency = 10（詳見上表）；Photo Processing Lambda 雖冷啟動 5-10s 較短，但尖峰 QPS 高，故 PC = 20；其餘 Lambda 配置 0-5 PC 即可，因冷啟動對其影響在容許範圍。
+
 在雲端無伺服器架構中，最棘手的問題是「冷啟動（Cold Start）」延遲。當系統需要載入龐大的 AI 模型參數，或解壓縮高達數十 MB 的 Headless Chromium 執行檔與 Node.js 依賴庫時，Lambda 函數的初始化動輒需要耗費 5 到 15 秒39。為徹底克服此痛點，系統將針對負責 AI 辨識與 PDF 生成的關鍵 Lambda 函數啟用「預先配置的併發（Provisioned Concurrency）」17。此設定能確保賽事期間始終有一批運算實例維持在「暖機（Warm）」的待命狀態，一旦 SQS 分配任務，函數即可在數毫秒內啟動執行緒進行處理。具體 Provisioned Concurrency 數量與各函數 Memory / Timeout 設定見 §4.2 配置表。
 
 此外，在 Lambda 的組態設定上，針對運行 Puppeteer 的函數，必須分配至少 2048 MB 的記憶體，以確保瀏覽器引擎有足夠的資源進行 HTML 與高解析度圖片的渲染，同時將逾時（Timeout）設定延長至 120 秒（PDF 生成場景）以防超時中斷20。在程式碼實作層面，系統將採用單例模式（Singleton Pattern），在 Lambda 的全域執行環境中持久化加載 AI 模型與瀏覽器實例（Browser Instance）；使得同一個運算容器在處理連續不斷的照片流時，能重複利用已啟動的資源，從根本上分攤掉初始化的龐大時間開銷20。
@@ -2690,7 +2783,9 @@ Terraform 透過三個變數管理：`var.deployment_topology`、`var.primary_re
 | 情境 | 復原方式 | RTO | RPO |
 | :---- | :---- | :---- | :---- |
 | 單一 Lambda 函數崩潰 | SQS 自動重試（最多 3 次）+ DLQ 寫入 | < 5 分鐘 | 照片可能延遲但不遺失 |
-| DynamoDB 資料庫故障 | DynamoDB Auto Scaling + Point-in-time Recovery（PITR） | < 15 分鐘 | 可恢復至過去 35 天內任一時刻（連續備份，精度 1 秒） |
+| DynamoDB 吞吐量限流（Throughput Throttling） | DynamoDB Auto Scaling 自動擴增 WCU/RCU + 指數退避 | < 1 分鐘 | 0（無資料遺失，僅延遲） |
+| DynamoDB 資料損毀（Data Corruption / 誤刪） | Point-in-time Recovery（PITR）+ 人工 restore 至過去 35 天內任一時刻 | < 15 分鐘（人工觸發後） | 可恢復至過去 35 天內任一時刻（連續備份，精度 1 秒） |
+| DynamoDB Global Tables 跨區同步失敗 | Conflict Resolution + Last-Writer-Wins（預設） | < 5 分鐘（自動） | 可能丟失最近 1-5 秒寫入（依 RTT） |
 | S3 儲存桶意外刪除 | S3 Versioning 開啟 + Life Cycle Rule 保存版本 | < 1 小時 | 最近刪除版本可復原 |
 | Primary Region（預設 `ap-northeast-1`）全斷 | 跨區域備援：照片以 S3 Cross-Region Replication 同步至 DR Region；DynamoDB Global Tables 雙寫；推播 SQS 自動切換至 DR Region 之 queue | < 4 小時 | 最近 5 分鐘資料 |
 | 賽事當日網路瞬斷（5G） | 每站攝影機本機 SSD 暫存，連線恢復後自動續傳（Resumable Upload） | 0（本地暫存） | 0（本地備份） |
@@ -2725,6 +2820,7 @@ Trace ID 會寫入 DynamoDB 任務狀態記錄，供除錯時直接以 Trace ID 
 | **端到端測試（E2E）** | 從 Mock 攝影機上傳 → S3 → SQS → Lambda → LINE Push Message 送達 | staging 環境 + LINE Debug 帳號，模擬 1000 張照片批次處理 | SLA P95 ≤ 5 分鐘達成，無錯誤 |
 | **負載/壓力測試（Load & Stress）** | 模擬 5000 張照片/小時持續湧入（集團通過高峰），驗證 SQS 佇列深度、Lambda 並發上限、OCR 成功率不掉速 | k6（HTTP 層）+ AWS Lambda concurrent invocations 監控 + 實際照片流 | 5000 張/小時 持續 30 分鐘：P95 延遲不超過 8 分鐘（加計 Line平台容許延遲），Lambda 錯誤率 < 1%，SQS 無訊息堆積 |
 | **破壞性測試（Chaos）** | 人為關閉 Lambda、網路瞬斷、S3 故意回傳 500，驗證 DLQ 寫入、SQS retry、DLQ 通知觸發正確 | AWS Fault Injection Simulator ( FIS ) | DLQ 任務正確寫入，賽事日第一天 end-to-end P95 ≤ 10 分鐘 |
+| **PDPA 撤銷端到端測試**（v1.5 新增） | 跑者呼叫 `DELETE /revoke` → DynamoDB `OAuthToken.status='revoked'` → S3 Cross-Region Replication 刪除標記 → DynamoDB Global Tables 條件刪除 → CloudTrail 事件寫入 → 推播引擎下次嘗試跳過該平台 → Gallery fallback 啟用 | staging + 多 Region mock + CloudTrail 查詢 | 全鏈路 < 5 分鐘完成；CloudTrail 100% 寫入；§4.3 §21 海外節點副本確認刪除 |
 
 **AI 模型訓練資料來源：**採用 Hugging Face `race-numbers-detection-and-ocr` 資料集作為基準訓練集，並於每場賽事後以實測失敗案例擴充訓練集，持續微調模型權重。模型版本以 Semantic Versioning 管理，並於 `/models/{version}/` 目錄存放每次上線前之模型 checkpoint。
 
@@ -2840,24 +2936,56 @@ Face Re-ID 為選配功能，跑者於註冊時自願上傳清晰自拍照作為
 ## **5\. 未來擴充性考量 (Scalability)**
 
 在架構設計初期，本系統便被賦予高度的鬆耦合、模組化與無狀態（Stateless）特性，這為未來的跨領域功能擴充與技術升級提供了極大的彈性與想像空間。  
-**5.1 新興社群平台的無縫整合** 由於系統的核心推播邏輯已將社群 API 的複雜性抽離為獨立的轉接器模組，當未來如 Bluesky（使用 AT Protocol，圖片上限 1MB）、TikTok（支援 Content Posting API）或 Pinterest 等新興平台崛起時44，開發團隊只需撰寫對應的 API 介接層，即可快速將新平台納入跑者的綁定選項中，而無須大幅重構核心的影像處理或排程系統。  
-**5.2 AI 辨識能力的演進：超越號碼布的身分確認技術** 當前系統以號碼布 OCR 為主要身分匹配方式（見 §3.2 Face Re-ID Fallback）。然而，冬季賽事中跑者常穿著外套遮擋號碼布，或號碼布因汗漬/泥濘嚴重污損，導致 OCR 完全失效。未來系統可擴充以下尚未實作之身分確認技術：
+### **5.1 新興社群平台的無縫整合**
+
+由於系統的核心推播邏輯已將社群 API 的複雜性抽離為獨立的轉接器模組，當未來如 Bluesky（使用 AT Protocol，圖片上限 1MB）、TikTok（支援 Content Posting API）或 Pinterest 等新興平台崛起時44，開發團隊只需撰寫對應的 API 介接層，即可快速將新平台納入跑者的綁定選項中，而無須大幅重構核心的影像處理或排程系統。
+
+### **5.2 AI 辨識能力的演進：超越號碼布的身分確認技術**
+
+當前系統以號碼布 OCR 為主要身分匹配方式（見 §3.2 Face Re-ID Fallback）。然而，冬季賽事中跑者常穿著外套遮擋號碼布，或號碼布因汗漬/泥濘嚴重污損，導致 OCR 完全失效。未來系統可擴充以下尚未實作之身分確認技術：
 
 - **Person Re-ID（身軀重識別）：** 以深度神經網路比對跑者身形特徵（如體型、步態、穿著顏色），不依賴號碼布或人臉。適用於號碼布遮蔽且用戶未上傳自拍照之情境。需額外收集 training dataset 涵蓋多種氣候與姿態。
 - **Gait Recognition（步態辨識）：** 透過影片分析跑者獨特步態特徵，進一步提升集團通過時的身分確認準確率。
 - **多模態融合（Multi-modal Fusion）升級：** 將 OCR 置信度、人臉比對分數、Person Re-ID 分數以加权评分模型（Weighted Score Fusion）進行綜合排序，而非現行之串聯式降級（Cascade）判斷。
-- **自監督學習（Self-supervised Learning）：** 以賽事內大量未標記照片自動學習跑者視覺特徵 Embedding，減少對大規模標註資料集的依賴。  
-**5.3 多運動類別擴充：三鐵、自行車與游泳賽事支援** 本系統架構之 OCR 與物件偵測管線可擴充至三鐵（鐵人三項）、自行車賽與游泳賽事。需注意差異化訓練資料：自行車賽中參賽者之號碼布常置於頭盔或車身而非胸前，OCR 目標區域與姿態各異；游泳賽事中參賽者於出發與轉換區拍攝，衣物與號碼布形式亦不同於路跑。模型微調須收集中、長距離鐵人三項賽事之公開照片集（如 Ironman、Challenge Family 系列賽）與 UCI 自行車賽影像，建立獨立之領域適配模型權重，再於推論時依據賽事類型動態切換對應模型。
+- **自監督學習（Self-supervised Learning）：** 以賽事內大量未標記照片自動學習跑者視覺特徵 Embedding，減少對大規模標註資料集的依賴。
 
-**5.4 從靜態影像邁向動態短影音（Reels / Shorts）的全自動生成** 隨著全球社群媒體的演算法全面向短影音（Short-form Video）傾斜，單純的靜態照片推播已不足以壟斷社群流量與注意力。未來的擴充藍圖中，無伺服器處理層可引入基於 FFmpeg 的 Lambda Layer 或整合雲端影片轉碼服務（如 AWS Elemental MediaConvert）。當系統偵測到特定點位（如終點線）有拍攝跑者的連拍圖或短片時，可自動將跑者的配速數據、動態賽事 Logo 與背景音樂合成為一支 15 秒的垂直格式（9:16）短影片。這些影片可透過以下平台 API 自動發布：
+### **5.3 多運動類別擴充：三鐵、自行車與游泳賽事支援**
+
+本系統架構之 OCR 與物件偵測管線可擴充至三鐵（鐵人三項）、自行車賽與游泳賽事。需注意差異化訓練資料：自行車賽中參賽者之號碼布常置於頭盔或車身而非胸前，OCR 目標區域與姿態各異；游泳賽事中參賽者於出發與轉換區拍攝，衣物與號碼布形式亦不同於路跑。模型微調須收集中、長距離鐵人三項賽事之公開照片集（如 Ironman、Challenge Family 系列賽）與 UCI 自行車賽影像，建立獨立之領域適配模型權重，再於推論時依據賽事類型動態切換對應模型。
+
+### **5.4 從靜態影像邁向動態短影音（Reels / Shorts）的全自動生成**
 
 - **Instagram Reels API：** 單支 Reels 最長 90 秒至 3 分鐘（依 IG 帳號類型而異，Business / Creator 帳號上限較高）；檔案上限約 1 GB；解析度 1080×1920（9:16）為最佳。
 - **Threads Video API：** 影片最長 5 分鐘；檔案上限 1 GB（單次上傳）；解析度 1080×1920（9:16）為標準。
 
-預設影片生成長度為 15–30 秒（對應「15 秒短影音」之設計目標），由 `EventFeatureConfig.rendering.videoMaxDurationSec` 設定控制（預設 30，可由後台調整至 90）。當實際影片超出平台上限時，系統自動將影片截斷為多段 Clip 並依序發布，避免單支影片推播失敗。所有影片推播均遵守 §4.3 之 PDPA 跨境傳輸規範。這項基於短影音的自動化升級，將成為進一步提升賽事曝光量與網路互動率的強大新引擎。  
+預設影片生成長度為 15–30 秒（對應「15 秒短影音」之設計目標），由 `EventFeatureConfig.rendering.videoMaxDurationSec` 設定控制（預設 30，可由後台調整至 90）。當實際影片超出平台上限時，系統自動將影片截斷為多段 Clip 並依序發布，避免單支影片推播失敗。所有影片推播均遵守 §4.3 之 PDPA 跨境傳輸規範。這項基於短影音的自動化升級，將成為進一步提升賽事曝光量與網路互動率的強大新引擎。
+
+**§5.4 與既有 photo pipeline 相容性策略（v1.5 補充）：**
+
+短影音擴充採「**水平擴充 + 共用 publish-queue**」設計，**不新增獨立 Lambda**，避免推播引擎分裂：
+
+| 元件 | 既有 photo pipeline | 短影音擴充（未來） | 共用程度 |
+|:----|:----|:----|:----|
+| **攝入端** | 攝影師高頻上傳 → S3 Event | 同樣由 S3 Event 觸發，依檔案副檔名分流（`.jpg/.png` → photo; `.mp4/.mov` → video） | 共用 S3 + SQS Event Source |
+| **AI 推論** | Photo Processing Lambda (YOLOv8 + OCR + 美學評分) | 新增 Video Processing Lambda (FFmpeg Lambda Layer + FFmpeg frame extraction + 美學評分) | 兩者輸出相同 `NormalizedPublishTask` 介面，**獨立 Lambda 各自處理** |
+| **推播佇列** | `sqs://{eventId}-publish-queue` | **共用同一 queue**，由 message 內 `mediaType: 'image' \| 'video'` 欄位分流 | 完全共用，避免雙維護 |
+| **推播引擎** | Publish Lambda + Social Adapter | 同樣 Publish Lambda 處理；Adapter 介面不變（已支援 video，詳見 §2.8） | 完全共用 |
+| **S3 儲存** | `{env}-imarathon-photos/{eventId}/` | 同前綴，僅多 video 副檔名檔案；影片 metadata 寫入 S3 Object Metadata | 共用 bucket，僅靠 metadata 區分 |
+
+**關鍵決策：** 不新增 `video-publish-queue` 也不新增 `Video Publish Lambda` —— 推播引擎層完全共用。AI 推論層**獨立**（Photo vs Video 兩 Lambda），因為計算特性差異大（影片需 FFmpeg 抽幀 + 多幀合併評分）。此設計維持 §2.8 Adapter Pattern 與 §2.10 Inference Adapter 之抽象層一致性。
+
+**功能開關：** §2.11 須新增 `VIDEO_REELS_AUTO_GENERATE` Feature Flag（預設關閉），控制是否啟用短影音自動生成與推播；啟用時自動啟用相關之上傳分流邏輯。
+
+**實作階段：**
+- v2.0：§5.4 完整實作（影片生成 + 推播）
+- v2.1：Person Re-ID / Gait Recognition（§5.2）
+- v2.2：多運動類別（§5.3）
+
 綜上所述，本需求規格與系統架構書定義了一個具備高度前瞻性與技術可行性的數位藍圖。透過嚴謹的無伺服器雲端基礎建設、智慧化的邊緣與雲端協同人工智慧推論，以及緊扣社群脈動的 API 深度整合，此系統不僅將徹底解決傳統賽事攝影的痛點，更將為未來的運動科技服務立下全新的數位轉型標竿。
 
 #### **引用的著作**
+
+**引文編號使用說明（v1.5 補充）：** 本 SPEC 之引文編號（如「1」「13」「27」）對應至下方清單編號，於正文內以**阿拉伯數字**標示於相關論述後（例如「…傳統 OCR 辨識率大幅降低1」）。§3.1 等長段落引文編號較密集，可能連續出現多個編號（如「…詳閱 PDPA 規範24」），此屬刻意保留之引用密度，便於讀者追溯原文出處。**不**重新編排為 footnote 形式（如 `[24]`），以維持 markdown 純文字可讀性與 git diff 友善性。
 
 1. How to Deliver Marathon Photos With Facial Recognition App \- SnapSeek, [https://snapseek.app/blog/marathon-face-recognition-photos](https://snapseek.app/blog/marathon-face-recognition-photos)  
 2. Race AI : A Deep Learning Approach to Marathon Bib Detection and Recognition | Request PDF \- ResearchGate, [https://www.researchgate.net/publication/395041941\_Race\_AI\_A\_Deep\_Learning\_Approach\_to\_Marathon\_Bib\_Detection\_and\_Recognition](https://www.researchgate.net/publication/395041941_Race_AI_A_Deep_Learning_Approach_to_Marathon_Bib_Detection_and_Recognition)  
