@@ -66,7 +66,90 @@ async function markPhotoProcessed(taskId: string, payload: PublishTask): Promise
 
 ### **2.3 AI 推論與影像渲染層**
 
-接下來，SQS 將觸發具備高度彈性擴展能力的運算服務（如 AWS Lambda），啟動核心的影像處理與人工智慧管線。Lambda 函數會呼叫預先訓練好的邊緣或雲端物件偵測模型（如 YOLOv8 或 RF-DETR），精確進行跑者身軀與號碼布的邊界框（Bounding Box）定位，隨後交由 OCR 引擎提取字元2。辨識成功後，影像將傳遞至基於 Node.js 的 Sharp 影像處理模組，進行浮水印、濾鏡與賽事數據的動態疊加渲染10。  
+接下來，SQS 將觸發具備高度彈性擴展能力的運算服務（如 AWS Lambda），啟動核心的影像處理與人工智慧管線。Lambda 函數會呼叫預先訓練好的邊緣或雲端物件偵測模型（如 YOLOv8 或 RF-DETR），精確進行跑者身軀與號碼布的邊界框（Bounding Box）定位，隨後交由 OCR 引擎提取字元2。辨識成功後，影像將傳遞至基於 Node.js 的 Sharp 影像處理模組，進行浮水印、濾鏡與賽事數據的動態疊加渲染10。
+
+#### **競品技術對標與護城河設計（§2.3.X）**
+
+基於 deep-research 對全球賽事照片服務商之 3-vote 對抗驗證(15 確認/10 駁回),Photohawk 為目前技術最接近之競品(OCR + Face Recognition + B2B SaaS),但商業模式卡在「銷售端」,未進入「消費者端自動推播」。本節定義對 Photohawk 等競品之差異化設計與護城河(moat)建構策略,供 §2.10 推論抽象層、§2.8 推播引擎、§3.8 後台定價之設計參考。
+
+**對 Photohawk 的差異化：**
+
+| 維度 | Photohawk | 本系統 (SPEC.md) |
+|:----|:----|:----|
+| **商業模式** | B2B SaaS(向賽事主辦方收月費+上傳費+銷售佣金 13.5%–25%) | B2C 為主(跑者自助授權)+ B2B 為輔(§3.8.X 三層定價) |
+| **核心交付** | 照片搜尋+銷售平台(賽事主辦方自有網域) | 自動 OAuth 推播至跑者個人 IG/LINE/Threads 帳號 |
+| **定價結構** | Pay As You Go $0/月 / Lite $16.99 / Pro $29.99 / Enterprise $44.99 | Free / Standard NT$50,000 / Premium NT$200,000+(見 §3.8.X) |
+| **覆蓋規模** | 宣稱 29 國/450+ 會員/1.2 億張照片(後者為公司行銷數字,未經第三方稽核) | 台灣優先 + 日本 + 東南亞 |
+| **Face Recognition** | 跑者上傳自拍後 AI 從賽事照片庫找出本人 | 同(§3.2 Face Re-ID Fallback)+ 自動推播至本人社群 |
+| **與原圖所有者之互動** | 賽事方管理,跑者被動搜尋 | 跑者主動授權後,系統自動推播 |
+
+**核心介面定義：**
+
+```typescript
+interface CompetitiveDifferentiation {
+  eventId: string;
+
+  // 對主要競品之差異化設計
+  vsPhotohawk: {
+    b2cVsB2b: 'b2c';                        // 跑者自助,非賽事方付費為主要商業模式
+    oAuthAutoPublishing: true;              // Photohawk 無此功能 — 本系統核心護城河
+    mobileNativeFlow: true;                 // LIFF SDK 在 LINE App 內一鍵授權 — Photohawk 無 LINE 整合
+    jurisdictionAwareConsent: true;        // §3.1.X 多司法管轄區合規 — Photohawk 無此設計
+    withdrawalCapability: true;            // §3.1.Y Post-Push Withdrawal — Photohawk 無撤回機制
+  };
+
+  // 對 Pic2Go / MYLAPS RunnerTag / Bhaago India 等已知有自動推播之服務
+  // (deep-research 未深入驗證,假設其商業模式為 B2C;此處預留差異化欄位)
+  vsOtherAutoPushServices: {
+    multiJurisdictionCompliance: true;      // §3.1.X — 多司法管轄區合規
+    dropInArchitecture: true;               // §2.6 多租戶隔離 + §2.8 社群平台抽象 — 第三方賽事可快速接入
+    dualConsentWithdrawal: true;            // §3.1.Y — 雙重確認 + 撤回
+  };
+
+  // 必須在 MVP 前建立的護城河(先發優勢窗口)
+  moat: {
+    patentFiled?: boolean;                  // 「自動推播方法」專利申請(優先權 12 個月)
+    patentApplicationId?: string;           // 申請案號
+    firstMoverAdvantageExpiry: string;      // 預估 18 個月內會有模仿者
+    dataNetworkEffect: boolean;             // 累積跑者授權資料後,新賽事進入門檻降低
+    brandAssociation: 'marathon' | 'photo' | 'ai';  // 品牌定位關鍵字
+  };
+
+  // 觀察指標(供每季競品追蹤)
+  competitorTracking: {
+    photohawkFeatureReleasesMonitored: boolean;   // 訂閱 Photohawk Changelog
+    bhaagoIndiaMonitored: boolean;
+    pic2GoMonitored: boolean;
+    runnerTagMonitored: boolean;
+    quarterlyCompetitorReport: boolean;           // 每季產出競品報告
+  };
+}
+```
+
+**§2.10 推論抽象層之競品對標補強：**
+
+§2.10 已定義之 `IInferenceAdapter` / `IFaceMatchAdapter` / `IAestheticScoringAdapter` 介面已涵蓋多引擎支援(Gemini / GPT-4o / Claude / YOLOv8 / RF-DETR / SnapSeek / Ollama),足以應對 Photohawk 之 OCR + Face Recognition 競爭。本節新增之差異化重點:
+
+- **SnapSeek 為本系統已採用之 Face Re-ID 引擎**(§2.10 P0 預設);若 Photohawk 採用 SnapSeek 對手(如 AWS Rekognition、Clarifai、Face++),則本系統需評估引擎切換
+- **§2.10 「多引擎級聯降級」(Cascade Fallback)** 設計使本系統在引擎失敗時自動升級至高精度引擎(Claude 3.5 Sonnet),優於 Photohawk 之單引擎依賴
+- **§2.10 「本地部署模型的管理」**(Model Registry + 藍綠部署)使本系統可支援「隱私優先」策略之主辦方,優於 Photohawk 純雲端架構
+
+**§2.8 推播引擎之競品對標補強：**
+
+- Photohawk 無 OAuth 自動推播能力,本系統透過 §2.8「社群平台整合抽象層」與 §2.11 `PLATFORM_FALLBACK_CHAIN` 達成 LINE Primary → Meta Secondary 之降級鏈
+- §2.8「Per-Runner Token Bucket 限流」(rate=10/min, burst=15)防止單一跑者 spam,優於 Photohawk 無個人限流之設計
+- §2.8「小紅書分享預覽卡機制」覆蓋亞洲女性跑者滲透率高之平台,優於 Photohawk 之歐美中心設計
+
+**先發優勢窗口評估：**
+
+- deep-research 驗證之 5 家代表性服務商(Phomi / AllSports-Photo Create / MarathonFoto / FinisherPix / Photohawk)均無 OAuth 自動推播
+- 預估先發優勢窗口為 **18 個月**(基於 Photohawk 之 OCR+Face Recognition B2B 商業模式已驗證技術可行性)
+- 建議行動:
+  1. MVP 上線前申請「自動推播方法」專利(優先權 12 個月)
+  2. 鎖定台灣/日本/東南亞市場(Photohawk 尚未明確進入)
+  3. 累積跑者授權資料形成 data network effect
+  4. 與 LINE 官方帳號代理商建立策略夥伴關係(LINE 為 Photohawk 之明顯缺口)
+
 ### **2.4 社群發布與展現層**
 
 最終的社群發布與展現層，系統會依據辨識出的跑者身分，查詢關聯的 OAuth 授權權杖（Access Tokens），並調用對應的平台 API（如 Meta Graph API、Threads API、LINE Messaging API），執行非同步的媒體上傳與貼文發布任務，完成端到端（End-to-End）的全自動化資料流12。
@@ -394,6 +477,138 @@ interface ISocialPlatformAdapter {
 2. 推播時，訊息文案包含「一鍵分享至小紅書」Deep Link，點擊後在 App 內開啟預覽卡，跑者可一鍵複製完整文案或截圖分享
 3. 對於已授權 LINE 的港澳/東南亞女性跑者，可同時以 LINE 推播小紅書適用格式（emoji + 主題標籤 `#跑步``#完賽`+ 種草語氣）
 4. Dcard 採用相同機制，以分享預覽卡形式提供一鍵分享至 Dcard 看板
+
+#### **平台政策風險管理（§2.8.X）**
+
+基於 deep-research 對 Meta Threads API 存取審查(被驗證者描述為「extremely difficult」與「opaque」)與 Threads 限流(滾動 24 小時 250 則貼文 + 1,000 則回覆)之觀察,本節定義平台政策風險之介面層級管理。本節為 §3.9「平台條款變動應變計畫」之介面層細節,提供 ISocialPlatformAdapter 之政策風險觀察點與降級信號。
+
+**為何介面層需關注政策風險(而非僅 §3.9 治理層)：**
+
+- Adapter Pattern 之優勢在於「平台差異抽象化」,但若無政策風險觀察點,Adapter 僅處理 API 語法層級差異,無法向上層(Publish 引擎、§3.9 應變計畫)回報「平台條款層級」之風險
+- 本節新增之 `PlatformPolicyRisk` 介面由各 Adapter 實作時填報,提供 §3.9 監控機制所需之原始資料
+
+**核心介面定義：**
+
+```typescript
+interface PlatformPolicyRisk {
+  platform: string;                         // 'instagram' | 'threads' | 'facebook' | 'line'
+
+  // Meta App Review 狀態(僅 Meta 系平台適用)
+  metaAppReviewStatus: 'not_started' | 'in_review' | 'approved' | 'revoked';
+  metaReviewExpiryAt?: string;              // Meta App Review 通常 12 個月效期
+  metaTechProviderApplicationId?: string;   // Tech Provider 申請 ID(被驗證為「extremely difficult」)
+  videoSubmissionUrl?: string;              // 審查用影片示範 URL
+
+  // Threads 限流追蹤(僅 Threads 適用)
+  threadsRolling24hPostCount: number;
+  threadsRolling24hReplyCount: number;
+  threadsRateLimitHitAt?: string;
+  threadsRateLimitBuffer: number;           // 預設 0.2(保留 20% 緩衝)
+
+  // 平台條款變更通知(Webhook 訂閱狀態)
+  metaWebhookSubscriptionActive: boolean;
+  threadsWebhookSubscriptionActive: boolean;
+  lineWebhookSubscriptionActive: boolean;
+
+  // 平台帳號健康度(由 Adapter 自動觀察)
+  accountHealth: {
+    lastSuccessfulPushAt?: string;
+    consecutiveFailureCount: number;        // 連續失敗次數;> 5 觸發 P1 警告
+    platformWarningReceived: boolean;        // 是否收到平台警告信(如 spam 警告)
+    platformRestrictionType?: 'reduced_reach' | 'feature_limited' | 'temporary_block' | 'permanent_ban';
+  };
+
+  // 平台條款變動觀察(由 Adapter 透過 RSS/Changelog 監控填報)
+  recentPolicyChanges: {
+    detectedAt: string;
+    changeSummary: string;
+    impactAssessment: 'none' | 'low' | 'medium' | 'high';
+    responseAction: string;
+  }[];
+}
+```
+
+**Meta Threads API 存取審查介面（重點細則）：**
+
+```typescript
+interface MetaTechProviderApplication {
+  // 申請流程狀態追蹤
+  applicationStatus: 'draft' | 'submitted' | 'in_review' | 'rejected' | 'approved';
+
+  // 申請所需之 Metadata(對應 §2.8 自動產出之影片腳本)
+  applicationMetadata: {
+    appName: string;
+    useCase: 'marathon_photo_auto_publishing';
+    videoDemoUrl: string;                   // 5-10 分鐘影片,展示 instagram_content_publish 與 threads_content_publish 之使用情境
+    testingInstructions: string;            // 詳細步驟供 Meta Reviewer 驗證
+    dataHandlingDisclosure: string;         // 個資處理與隱私政策連結
+    permissionJustification: {
+      permission: string;                   // 'instagram_content_publish'
+      whyNeeded: string;                    // '用於將賽事完賽照片自動推播至跑者個人 IG 帳號'
+      alternativeConsidered: string;        // 'IG Personal Account 不支援 API,故需 Business Account'
+    }[];
+  };
+
+  // 預估審查週期(基於 deep-research 觀察)
+  expectedReviewDurationDays: number;       // 7-30 天(業界觀察值)
+  reviewStartedAt?: string;
+  reviewCompletedAt?: string;
+  reviewerFeedbackLog: string[];
+}
+```
+
+**平台條款變動觀察點（Adapter 實作契約）：**
+
+各 ISocialPlatformAdapter 實作時,除原 `publish()` / `handleRateLimit()` / `handleAuthFailure()` / `healthCheck()` / `formatPostText()` 五方法外,**新增**以下觀察方法:
+
+```typescript
+interface ISocialPlatformAdapter {
+  // ...(既有 5 方法保留)...
+
+  // 新增:觀察平台條款變動(RSS / Changelog / Webhook)
+  observePolicyChanges(): Promise<PlatformPolicyChange[]>;
+
+  // 新增:取得當前 policy 風險評估(供 §3.9 監控使用)
+  getPolicyRisk(): Promise<PlatformPolicyRisk>;
+
+  // 新增:驗證當前批次是否符合平台當前條款(例:每日限流是否還有餘裕)
+  validateBatchCompliance(task: NormalizedPublishTask[]): Promise<{
+    compliant: boolean;
+    blockedTasks: NormalizedPublishTask[];   // 被條款阻擋的任務
+    reason?: string;
+  }>;
+
+  // 新增:撤回已推播貼文(§3.1.Y Post-Push Withdrawal 機制使用)
+  deletePost(externalPostId: string, credentials: PlatformCredentials): Promise<{
+    deleted: boolean;
+    alreadyGone: boolean;                    // 平台端已不存在,視為撤回成功
+    rateLimited: boolean;
+  }>;
+}
+```
+
+**Threads 限流緩衝實作（介面層細則）：**
+
+- Threads 對單一 profile 滾動 24 小時 250 則貼文 + 1,000 則回覆上限(1 個 carousel 算 1 則貼文)
+- 推播引擎於 `validateBatchCompliance()` 內比對 `threadsRolling24hPostCount + 批次數量` 是否超過 `250 × (1 - threadsRateLimitBuffer)`
+- 超限任務自動延後至下個 24 小時視窗(不寫 DLQ,因屬平台政策性限制而非系統故障)
+- `threadsRolling24hPostCount` 由 Adapter 於每次 `publish()` 成功後 +1,並於 Threads API 回 200 時自動同步至 DynamoDB `PlatformUsageMetrics` 表
+
+**Meta 政策變動 → §3.9 應變計畫觸發鏈：**
+
+```
+Meta App Review 過期前 30 天
+  → §2.8.X MetaAppReviewChecklist.metaReviewExpiryAt 倒數
+  → §2.11 Feature Flag META_APP_REVIEW_STATUS 觸發 P2 警告
+  → §3.9 監控機制記錄事件
+  → Super Admin 後台顯示「請提前送審續期」提醒
+
+Meta 撤回 threads_content_publish scope
+  → Adapter publish() 回 401/403 with scope_error
+  → §2.8.X handleAuthFailure() 標記 token_revoked
+  → §3.9 P0_immediate 觸發
+  → 自動啟用 Open Graph 預覽卡 + LINE 全量推播降級
+```
 
 ### **2.9 雲端基礎設施抽象層**
 
@@ -1100,6 +1315,179 @@ Lambda 不得具備 `secretsmanager:PutSecretValue`、`secretsmanager:DeleteSecr
 在 LINE 平台的整合上，系統將利用 Messaging API 的推播訊息（Push Message）功能。跑者在註冊時需加入賽事專屬的 LINE 官方帳號為好友，系統藉此取得該跑者的唯一使用者 ID（User ID）22。此 ID 將作為後續點對點推播影像訊息（Image Message）或客製化圖文選單（Imagemap Message）的目標位址14。  
 此外，遵循台灣《個人資料保護法》（PDPA），賽前註冊系統必須具備極為嚴謹的隱私權同意與告知機制。系統收集之資料包含跑者的真實姓名、精確定位資料、影像，甚至潛在的生理特徵（如後續啟用的人臉辨識），這些均屬於受高度管制的個人資料甚至特種個人資料範圍24。系統不得採用預設勾選或將同意條款包裹於一般賽事報名條款中（Bundled Consent）27。必須以獨立的隱私聲明頁面，明確告知蒐集目的、資料利用範圍、傳輸對象以及跑者依法可行使之存取、更正與刪除權利25。為了負起法定的舉證責任（Burden of Proof），系統資料庫需精確記錄每一次同意操作的時間戳記、IP 位址與同意條款版本，確保日後受主管機關稽核時，具備無懈可擊的數位證據力27。
 
+#### **多司法管轄區合規設計（§3.1.X）**
+
+本系統部署範圍橫跨台灣、日本、歐盟、中國大陸等司法管轄區，各區域對臉部辨識（生物特徵資料）之處理、跨境傳輸、自動化決策皆有不同強制規範。本節定義各區域之差異化合規設計，使系統於單一 codebase 內同時滿足多重法域要求。
+
+**適用法域與強制規範對照：**
+
+| 法域 | 主要法規 | 對本系統之強制要求 | SPEC 對應設計 |
+|:----|:----|:----|:----|
+| **台灣 (TW)** | 《個人資料保護法》(PDPA) | 特種個人資料(§6)須取得當事人書面同意;跨境傳輸(§21)原則禁止,例外須經明確同意 | §4.3 已涵蓋 PDPA §21 跨境同意;§4.7 Face Re-ID 自拍照 24hr 自動刪除 |
+| **日本 (JP)** | 《個人情報保護法》(APPI) 2026 修法(內閣 4/7 通過、提交國會) | 新增「Specified Biometric Personal Information」類別;臉部特徵資料**禁止以 opt-out 機制移轉第三方** | 本節 §3.1.X 新增 `biometricConsent.thirdPartyTransferOptIn` 強制 opt-in |
+| **歐盟 (EU)** | GDPR Art. 9(2)(a) + Art. 6(1)(a) | 生物辨識資料處理須「明確同意」(explicit consent),嚴格度高於一般同意 | 本節 §3.1.X 新增 `biometricConsent.explicitConsentRequired` |
+| **中國大陸 (CN)** | 《個人信息保護法》(PIPL) | 敏感個人生物特徵資訊須取得「單獨同意」;不得超過最小必要原則 | 本節 §3.1.X 新增 `consentDesign.cn.bundled=false` + 最小化蒐集原則 |
+
+**標準化合規資料模型：**
+
+```typescript
+// 司法管轄區合規設定（JurisdictionCompliance）
+interface JurisdictionCompliance {
+  eventId: string;
+  applicableRegions: ('tw' | 'jp' | 'eu' | 'cn' | 'global')[];
+  defaultRegion: 'tw' | 'jp' | 'eu' | 'cn';   // 賽事主辦單位所在地
+
+  // 依區域分層之同意設計
+  consentDesign: {
+    tw: ConsentConfig;      // PDPA — 獨立同意 + 跨境傳輸同意
+    jp: ConsentConfig;      // APPI — opt-in(非 opt-out)+ 揭露移轉對象
+    eu: ConsentConfig;      // GDPR — 須 explicit consent,不得包裹於一般條款
+    cn: ConsentConfig;      // PIPL — 須單獨同意 + 最小化蒐集原則
+  };
+
+  // 臉部辨識特別條款(僅於 faceReIdConsent=true 時適用)
+  biometricConsent: {
+    explicitConsentRequired: boolean;        // GDPR Art. 9(2)(a) — EU 市場必須 true
+    thirdPartyTransferOptIn: boolean;        // 日本 APPI 修法 — JP 市場必須 true
+    dataRetentionDays: number;               // 預設 30 天自動刪除自拍照
+    deletionProofRecord: boolean;            // 刪除時記錄 IP + 時間戳(舉證責任)
+    conditionalUseOnly: boolean;             // 僅得用於明確告知之目的(不得流用)
+  };
+
+  // 跨境傳輸同意書(獨立欄位)
+  crossBorderTransferConsent: {
+    destinationCountries: string[];          // ['US'(Meta 資料中心), 'SG'(LINE)]
+    transferMechanism: 'SCC' | 'adequacy' | 'BCR' | 'PDPA_§21_consent';
+    userAcknowledged: boolean;
+    acknowledgedAt?: string;                 // ISO 8601
+    ipAddress?: string;
+  };
+}
+
+interface ConsentConfig {
+  version: string;                           // e.g. 'pdpa-2026-v1'
+  isBundled: false;                          // 強制 false — 不可與報名條款包裹
+  consentTimestamp: string;
+  ipAddress: string;
+  withdrawalEndpoint: string;                // '/api/v1/races/{eventId}/runner/{bib}/revoke'
+  withdrawalEffect: 'immediate_purge' | 'race_end_purge';
+  policyVersion: string;                     // 隱私政策版本,供日後版本對照
+}
+```
+
+**日本市場進入條件（Feature Flag 鎖定）：**
+
+當 `EventConfig.region === 'jp'` 時,系統於初始化時強制設定以下約束（主辦方不得覆寫）:
+
+```typescript
+// 日本市場 Feature Flag 鎖定 — 不可由主辦方覆寫
+const JP_REGION_LOCK: Partial<EventFeatureConfig> = {
+  platforms: {
+    // 第三方推播平台需用戶另行 opt-in(因 APPI 禁止 opt-out 移轉生物辨識資料)
+    line: { enabled: true, requiresExplicitConsent: true },
+    instagram: { enabled: true, requiresExplicitConsent: true },
+    threads: { enabled: true, requiresExplicitConsent: true },
+  },
+  ai: {
+    faceReIdEnabled: true,
+    // 第三方移轉需 opt-in;不得於 Face Re-ID 同意書內以 opt-out 機制處理
+    faceReIdThirdPartyTransferRequiresOptIn: true,
+  },
+};
+```
+
+**歐洲市場進入條件：**
+
+當 `EventConfig.region === 'eu'` 時:
+
+- `biometricConsent.explicitConsentRequired` 強制為 `true`
+- Face Re-ID Fallback 流程須於「獨立於 OCR 同意的勾選頁」取得 explicit consent
+- 禁止任何「預設勾選」、「包裹同意」(bundled consent) UX
+- 臉部特徵向量(feature embedding)與自拍照原始檔分開儲存;向量僅得用於當次賽事比對,不得用於跨賽事訓練或留存
+
+**台灣 PDPA 補強要求（基於 §3.1 既有機制擴充）：**
+
+- 「服務限制告知」頁面須新增「臉部辨識拒絕之替代方案」段落,明確告知跑者:拒絕 Face Re-ID 後,系統降級為 OCR-only 模式,仍享有 LINE/IG/Threads 推播
+- §4.3 「PDPA §21 跨境傳輸合規」機制對歐盟與日本跑者亦適用(縱使賽事主辦單位位於台灣,跑者於歐盟/日本完成註冊仍須取得獨立跨境同意)
+
+**§4.3 既有 PDPA 表之擴充項目（新增列）：**
+
+| PDPA 法規核心要求 | 系統實作與合規對策 |
+|:----|:----|
+| **（既有四項保留）** | （詳見 §4.3 原表） |
+| **§3.1.X 跨國跑者之 Face Re-ID 同意** | 當跑者 IP 位址或註冊時段判定為歐盟/日本/中國大陸時,Face Re-ID 同意流程須切換至該區域之強制合規模式(見 `JurisdictionCompliance.biometricConsent`) |
+| **§3.1.X 賽事主辦方區域感知** | `EventConfig.region` 欄位決定預設同意書語言與法域設計;若賽事為國際賽,系統依跑者 IP 與註冊來源自動選擇對應同意書 |
+
+#### **推播預覽與撤回機制（§3.1.Y）**
+
+基於 deep-research 對論壇接受度與 Photo Create X 帳號「購買前禁止分享」規定的間接推論,跑者對「照片被自動貼到我 IG」之心理門檻高於「自動搜尋」。本節定義雙重確認機制與推播後撤回窗口,以建立 UX 信任。
+
+**雙重確認機制（Dual Consent Flow）：**
+
+```typescript
+interface PushPreviewConsent {
+  eventId: string;
+  runnerId: string;
+
+  // 雙重同意設計 — 兩階段勾選
+  dualConsentFlow: {
+    // 第一階段:報名時勾選(§3.1 既有機制)
+    registrationConsent: {
+      granted: boolean;
+      grantedAt: string;
+      ipAddress: string;
+    };
+
+    // 第二階段:首次推播前再行確認
+    firstPushPreviewConsent: {
+      enabled: boolean;                       // 預設 true
+      previewSentAt?: string;
+      previewChannel: 'line_push';           // 透過 LINE 推送預覽圖
+      previewMessage: string;                 // '將於賽事當天自動將您的完賽照推播至 LINE/IG,是否同意?'
+      responseDeadline: string;               // ISO 8601,預設 push 前 60 分鐘
+      userResponse?: 'confirmed' | 'declined';
+      respondedAt?: string;
+    };
+  };
+
+  // 推播後撤回窗口
+  postPushWithdrawal: {
+    enabled: boolean;                       // 預設 true
+    windowMinutes: number;                  // 預設 5 分鐘內可撤回
+    channel: 'line_reply_keyword' | 'app_button' | 'gallery_link';
+    keywordTrigger?: string;                // e.g. '撤回' / '刪除'
+    autoDeleteFromPlatform: boolean;        // 是否呼叫 Meta/LINE API 刪除已推播貼文
+  };
+
+  // 推播偏好設定(細粒度控制)
+  pushPreference: {
+    pushAtCheckpoint: boolean;              // 賽道中段是否推播(預設 false,僅終點推播)
+    aestheticFilterOnly: boolean;           // 僅推播經美學評分 > 0.7 的照片(預設 true)
+    pushMaxPerEvent: number;                // 單場賽事最多推播張數(預設 5)
+    quietHoursStart?: string;               // e.g. '23:00'(Asia/Taipei) — 深夜不推播
+    quietHoursEnd?: string;
+  };
+}
+```
+
+**撤回流程（Post-Push Withdrawal）：**
+
+1. 推播成功後,系統於 LINE Push Message 內附「撤回」按鈕或關鍵字觸發指令
+2. 跑者於 5 分鐘視窗內觸發撤回 → Publish Lambda 接收撤回訊息
+3. Publish Lambda 呼叫 `ISocialPlatformAdapter.deletePost(externalPostId)` 從原平台刪除已推播貼文
+4. DynamoDB `NormalizedPublishResult.status` 更新為 `withdrawn`,標記撤回時間與操作者
+5. CloudWatch 記錄 `metric: push_withdrawal_count` 供賽事後分析 UX 信任度
+6. 若撤回時 Meta/LINE API 回 404(已被平台刪除),視為撤回成功,不重試
+
+**§2.11 Feature Flag 新增項目（由 §3.1.Y 觸發）：**
+
+| 功能代碼 | 功能名稱 | 預設狀態 | 說明 |
+|:----|:----|:----|:----|
+| `PUSH_PREVIEW_DUAL_CONSENT` | 推播雙重確認機制 | ✅ 開啟 | 報名同意後,首次推播前再行確認 |
+| `POST_PUSH_WITHDRAWAL_WINDOW` | 推播後撤回視窗 | ✅ 開啟 | 預設 5 分鐘,可由 `windowMinutes` 調整 |
+| `PUSH_MAX_PER_EVENT` | 單場推播張數上限 | ✅ 開啟 | 預設 5 張,防止跑者被 spam 推播 |
+| `JURISDICTION_LOCK` | 區域合規鎖定 | ❌ 關閉 | 由 `EventConfig.region` 自動觸發;主辦方不得覆寫 |
+
 ### **3.2 即時影像處理與辨識流：邊緣到雲端的 AI 協同與極速渲染**
 
 賽事期間的影像處理要求極致的低延遲與極高的準確率。當攝影師按下快門後，影像將透過內建 FTP 或 API 上傳功能的相機，搭配 5G 網路直接推送到指定的雲端 S3 儲存貯列。此舉將觸發 SQS 佇列訊息，進而喚醒 AWS Lambda 函數進行非同步的初步處理8。  
@@ -1708,6 +2096,236 @@ LINE 官方帳號、Meta Business Account、Threads Developer Account、SnapSeek
 ```
 
 收到此請求後，系統依 `officialResultsUrl` 取得官方成績 JSON，匯入 DynamoDB，並觸發該 eventId 所有 DLQ 狀態為 `resolved` 或 `photo_matched` 之跑者的完賽報紙 PDF 生成任務（見 §3.4）。
+
+#### **賽事方定價與 ROI 計算（§3.8.X）**
+
+基於 deep-research 對 FinisherPix 兩種 B2B 模式（固定費率+自留銷售收入 / 收入分成+賽事佣金）的觀察,賽事方對「照片服務」有明確成本結構期望。本節定義三層 Freemium 定價與賽事方 ROI 計算面板,以突破 AllSports 銷售平台的單次付費慣性。
+
+**三層定價結構（對應 FinisherPix 模式延伸）：**
+
+```typescript
+interface EventPricingTier {
+  eventId: string;
+  selectedTier: 'free' | 'standard' | 'premium';
+
+  tiers: {
+    free: {
+      photosPerRunner: number;              // 預設 3 張
+      pushPlatforms: ('line' | 'instagram' | 'threads')[];  // 預設僅 LINE
+      newspaperEnabled: boolean;            // 預設 false
+      faceReIdEnabled: boolean;             // 預設 false(降低 AI 成本)
+      customWatermark: boolean;             // 預設 false
+      pricePerEvent: number;                // 0(免費)
+      targetUseCase: string;                // '小型賽事(< 500 人) / 試營運'
+    };
+    standard: {
+      photosPerRunner: number;              // 預設 8 張
+      pushPlatforms: ('line' | 'instagram' | 'threads' | 'facebook')[];
+      newspaperEnabled: boolean;            // 預設 true
+      faceReIdEnabled: boolean;             // 預設 true
+      customWatermark: boolean;             // 預設 true
+      pricePerEvent: number;                // 預估 NT$50,000
+      targetUseCase: string;                // '中型賽事(500-5,000 人) / 標準方案'
+    };
+    premium: {
+      photosPerRunner: 'unlimited';
+      pushPlatforms: ('line' | 'instagram' | 'threads' | 'facebook' | 'x')[];
+      newspaperEnabled: boolean;            // 預設 true
+      faceReIdEnabled: boolean;             // 預設 true
+      customWatermark: boolean;             // 預設 true
+      customNewspaperTemplate: boolean;     // 預設 true(客製 PDF 模板)
+      aestheticScoringEnabled: boolean;     // 預設 true(美學評分選圖)
+      pricePerEvent: number;                // 預估 NT$200,000+
+      targetUseCase: string;                // '大型賽事(> 5,000 人) / 國際賽 / 城市形象賽事'
+    };
+  };
+
+  // 升級觸發條件(自動推薦下一層)
+  upgradeTriggers: {
+    runnerCountThreshold: number;           // 預設 500 → 推薦 standard;5000 → 推薦 premium
+    photoCountThreshold: number;            // 預設 5,000 張 → 推薦 premium
+    socialImpressionsThreshold: number;     // 預設 100,000 → 推薦 premium(基於預估)
+  };
+}
+```
+
+**賽事方 ROI 計算面板（後台 Admin Dashboard）：**
+
+```typescript
+interface EventRoiMetrics {
+  eventId: string;
+
+  // 觸及指標(Reach Metrics)
+  reach: {
+    totalPushDelivered: number;             // 成功推播至至少一個平台的總張數
+    uniqueRunnersReached: number;           // 收到推播之獨立跑者數
+    totalSocialImpressions: number;         // 推播貼文之累積曝光(由各平台 API 回傳)
+    totalSocialEngagements: number;         // 讚 + 留言 + 分享 累積數
+    hashtagExposure: number;                // 賽事 hashtag 之擴散觸及人數
+  };
+
+  // 成本指標(Cost Metrics)
+  cost: {
+    eventPricingTierCost: number;           // 該場賽事所選方案費用
+    aiApiCost: number;                      // AI 推論 API 費用(可由 §2.10 策略影響)
+    linePushCost: number;                   // LINE 官方帳號 Push Message 費用
+    storageCost: number;                    // S3 儲存費用
+    totalInfrastructureCost: number;        // 上述加總
+  };
+
+  // 價值指標(Value Metrics)
+  value: {
+    costPerImpression: number;              // totalInfrastructureCost / totalSocialImpressions
+    costPerRunner: number;                  // totalInfrastructureCost / uniqueRunnersReached
+    brandAwarenessLift: number;             // 賽事 hashtag 與品牌字詞之搜尋量提升(可選整合 Google Trends API)
+    mediaValueEquivalent: number;           // 等價媒體曝光價值(假設 NT$50/CPM)
+  };
+
+  // 主辦方報告匯出
+  exportableReport: {
+    format: 'pdf' | 'xlsx';
+    recipients: string[];                   // 主辦方決策者 email
+    autoEmailAfterDays: number;             // 賽事結束後 N 天自動寄送
+  };
+}
+```
+
+**§3.8 後台新增面板項目：**
+
+| 面板 | 內容 | 對應介面 |
+|:----|:----|:----|
+| **既有四項（保留）** | 照片處理 / 跑者互動 / DLQ 處理 / 網路監控 | §3.8 原表 |
+| **賽事方 ROI 儀表板** | 觸及/成本/價值三大指標 + 自動報告匯出 | `EventRoiMetrics` |
+| **定價方案升級推薦** | 依 `upgradeTriggers` 自動通知主辦方升級方案 | `EventPricingTier.upgradeTriggers` |
+
+### **3.9 平台條款變動應變計畫**
+
+基於 deep-research 對 Meta Threads API 存取審查(被驗證者描述為「extremely difficult」與「opaque」)與 Threads 限流(滾動 24 小時 250 則貼文 + 1,000 則回覆)之觀察,Meta/Instagram/Threads 政策變動頻率高且無預警。本章定義平台條款變動之監控、分級應對與依賴度降低策略。
+
+**為何需要獨立章節：**
+
+- 2018 Cambridge Analytica(FB 政策急轉彎)、2020 iOS 14 ATT(影響所有 IDFA 追蹤)、2024 Threads 上線(新平台新規則)、2026 Threads 限流新規(每日上限) — 顯示社群平台政策變動週期已縮短至 12–24 個月
+- SPEC §2.8「社群平台整合抽象層」解決「日常 API 差異」,但「政策變動」屬不同層級風險,需獨立治理
+- 平台依賴度(Platform Dependency)是 SaaS 商業模式的致命弱點 — 需明確降級路徑
+
+**核心應變介面：**
+
+```typescript
+interface PlatformChangeResponsePlan {
+  // 監控機制
+  monitoring: {
+    metaChangelogWebhook: string;           // 訂閱 Meta Developer Changelog RSS
+    threadsChangelogWebhook: string;
+    metaAppReviewExpiryTracking: boolean;   // Meta App Review 通常 12 個月效期,提前 30 天警告
+    quarterlyPolicyReviewMeeting: boolean;  // 每季由 CTO/Product Owner 召開政策檢視會議
+  };
+
+  // 風險分級與應對(對應 §4.4 監控 P0/P1/P2 三級)
+  riskLevels: {
+    P0_immediate: {
+      // 例:Meta 撤回 threads_content_publish scope(完全無法推播)
+      // 例:Threads 平台停用(如同 2025 年 Twitter → X 之政策急轉)
+      trigger: 'meta_revokes_publish_scope' | 'platform_shutdown' | 'rate_limit_zero';
+      responseTime: '4 hours';
+      onCallEscalation: 'Super Admin + CTO';
+      actions: [
+        '啟用 Open Graph 預覽卡機制(§2.8)',
+        'LINE 全量推播作為 primary',
+        'Email 通知所有賽事方',
+        '主動聯絡 Meta Partner Manager',
+      ];
+    };
+    P1_warning: {
+      // 例:Threads 限流從 250/24h 降為 50/24h
+      // 例:Meta App Review 審查週期延長(由 7 天 → 30 天)
+      trigger: 'platform_announces_rate_limit_reduction' | 'app_review_delay';
+      responseTime: '48 hours';
+      actions: [
+        '調整 EventFeatureConfig.publishing.rateLimitBuffer',
+        '啟用多帳號分散推播(multi-account fallback)',
+        '提前 30 天提示主辦方預留備援推播窗口',
+      ];
+    };
+    P2_advisory: {
+      // 例:Threads 新增 Stories 推播 API
+      // 例:Meta 開放 Threads 商業帳號自動化發文(政策放寬)
+      trigger: 'platform_announces_new_feature' | 'platform_announces_relaxation';
+      responseTime: '14 days';
+      actions: [
+        '評估技術可行性',
+        '新增 Feature Flag(§2.11)',
+        '排入下個 Sprint 優先級',
+      ];
+    };
+  };
+
+  // 平台依賴度降低策略(Decoupling Strategy)
+  decouplingStrategy: {
+    lineAsPrimary: boolean;                 // LINE 為第一推播目標(日本/台灣滲透率高,API 較穩定)
+    fallbackToLine: boolean;                // Meta 失敗時自動降級至 LINE
+    emailAsLastResort: boolean;             // Email 報紙連結作為最終交付手段
+    galleryFallbackAlways: boolean;         // 無論推播成功與否,所有照片皆寫入 Gallery(跑者主動查詢)
+
+    // 平台依賴度評分(供每季政策檢視會議評估)
+    platformDependencyScore: {
+      line: number;                         // 0-10,越低越獨立
+      instagram: number;
+      threads: number;
+      facebook: number;
+    };
+  };
+}
+
+interface MetaAppReviewChecklist {
+  useCase: 'marathon_photo_auto_publishing';
+  requiredPermissions: [
+    'instagram_basic',
+    'instagram_content_publish',      // 須 Business Account + 連結粉絲專頁
+    'pages_show_list',
+    'threads_content_publish',         // 須 Meta App Review 通過(極困難)
+    'threads_delete'                   // 撤回推播能力,因應跑者撤銷授權
+  ];
+  businessVerificationCompleted: boolean;
+  metaAppReviewStatus: 'not_started' | 'in_review' | 'approved' | 'revoked';
+  metaReviewExpiryAt?: string;             // Meta App Review 通常 12 個月效期
+  metaTechProviderApplicationId?: string;
+  videoSubmissionUrl?: string;             // Meta 審查用影片示範 URL
+}
+```
+
+**§2.11 Feature Flag 新增項目（由 §3.9 觸發）：**
+
+| 功能代碼 | 功能名稱 | 預設狀態 | 說明 |
+|:----|:----|:----|:----|
+| `PLATFORM_FALLBACK_CHAIN` | 平台降級鏈 | ✅ 開啟 | 預設順序 `['line', 'instagram', 'threads', 'facebook', 'email']`;主辦方得調整順序 |
+| `META_APP_REVIEW_STATUS` | Meta App Review 狀態監控 | ✅ 開啟 | 預設阻擋推播直至審查通過;若 `metaReviewExpiryAt` 過期自動觸發 P1 警告 |
+| `THREADS_RATE_LIMIT_BUFFER` | Threads 限流緩衝 | ✅ 開啟 | 預設保留 20% 配額(250 × 0.8 = 200/24h);可由 `EventFeatureConfig.publishing.threadsRateLimitBuffer` 調整 |
+| `MULTI_ACCOUNT_PUBLISH` | 多帳號分散推播 | ❌ 關閉 | 當單一 Threads 帳號限流時自動切換至備援帳號;預設關閉以避免帳號管理複雜度 |
+| `GALLERY_FALLBACK_ALWAYS` | Gallery 永久降級 | ✅ 開啟 | 無論推播成功與否,所有照片皆寫入 Gallery(跑者主動查詢) — 永遠的最後手段 |
+
+**Threads 限流緩衝實作（§3.9 衍生細則）：**
+
+- Threads 對單一 profile 滾動 24 小時 250 則貼文 + 1,000 則回覆上限(1 個 carousel 算 1 則貼文)
+- 系統於推播引擎內維護 Redis Token Bucket:
+  - `key: threads:rate_limit:{threads_profile_id}:window_24h`
+  - `limit: 200(預設保留 20% 緩衝)`
+  - 觸發限流時:`EventFeatureConfig.publishing.threadsRateLimitBuffer` 自動減量,並將超額任務延後至下個 24 小時視窗
+- 超限任務不寫 DLQ,而是延遲重試(不同於一般 5xx 錯誤)
+
+**Meta App Review 流程支援：**
+
+- §3.8 後台既有「App Review Submission Helper」自動產生示範影片腳本與截圖
+- 本章節新增:`MetaAppReviewChecklist` 介面供 Super Admin 追蹤審查狀態與效期
+- 當 `metaReviewExpiryAt` 倒數 30 天,系統自動發送提醒給 Super Admin,要求提前送審續期
+
+**監控指標（新增至 §4.4 業務關鍵指標）：**
+
+| 指標 | 說明 | 警示閾值 |
+|:----|:----|:----|
+| `meta_push_success_rate` | Meta(IG/FB/Threads)推播成功率 | < 95% 觸發 P1 警告 |
+| `threads_push_success_rate` | Threads 推播成功率(獨立監控因 Threads 政策最不穩定) | < 90% 觸發 P1 警告 |
+| `meta_app_review_days_to_expiry` | Meta App Review 距到期天數 | < 30 天觸發 P2 警告 |
+| `push_withdrawal_count` | 跑者撤回推播次數(§3.1.Y) | > 5% 推播總數時觸發 P2 UX 信任度警告 |
 
 ## **4\. 非功能性需求 (Non-Functional Requirements)**
 
