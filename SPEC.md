@@ -1,5 +1,47 @@
 # **馬拉松賽事與社群互動連結系統：需求規格與系統架構書**
 
+## **0. 文件關係與版本資訊**
+
+本文件為本專案之**唯一實作級規格來源（Single Source of Truth for Implementation）**，所有工程師、QA、後台管理員、第三方整合商於開發、測試、上線時應以本文件為準。
+
+### **0.1 與其他文件的關係**
+
+| 文件 | 角色 | 維護狀態 | 關係 |
+|:----|:----|:----|:----|
+| **`proposal.md`**（同 repo） | 原始提案與市場調研 | **reference-only, archived** | 本 SPEC 整合自 proposal.md 之市場分析、目標客群、技術選型建議章節；proposal.md 之內容已併入本 SPEC §1 / §2 / §5，不再單獨維護。如需查閱歷史脈絡，請參見 `git log -- proposal.md` |
+| **本 SPEC.md** | 實作級規格 | **active, 持續修補** | 所有開發實作以此為準 |
+| **未來：`docs/api/openapi.yaml`** | API 自動產出（規劃中） | planned | §3.5 OpenAPI 規範之自動產出 |
+
+**重要：** 本 SPEC 內**無「詳見 proposal.md」之反向連結**，因 proposal.md 為歸檔狀態；如需引用具體提案數據（如「2024 全球馬拉松參賽人數 580 萬」），請查閱 git history `git log --all -- proposal.md` 或當前 SPEC 內已併入之段落。
+
+### **0.2 版本歷史**
+
+| 版本 | Commit | 日期 | 主要變更 |
+|:----|:----|:----|:----|
+| v0.9 | 6c94ca2 | 2026-06-XX | feat: incorporate proposal.md suggestions - Taiwan market, aesthetic scoring, IG story templates |
+| v1.0 | 167d5bc | 2026-06-XX | A7 fixes: Admin API補足 GET/PUT/DELETE events、oauth/callback已存在確認 |
+| v1.1 | d524858 | 2026-06-XX | fix: resolve audit findings - duplicate Section 2.8, add missing schemas and flows |
+| v1.2 | 66ac7fb | 2026-06-XX | docs(SPEC): repair 34 real issues across 7 sections |
+| v1.3 | 70a17ec | 2026-06-XX | feat(SPEC): P0~P2 deep-research 衍生優化 |
+| v1.4 | (current) | 2026-06-27 | chore(SPEC): audit fixes — F-1/F-2/F-3/F-4 + S-1/S-2/S-3/S-4/S-5/S-6 (詳見報告) |
+
+### **0.3 本次審計（P0/P1 Round 1）變更摘要**
+
+詳見 commit message；高層級摘要：
+
+- **F-1 (致命):** 統一 OCR 置信度閾值定義 — Cascade 內部 `stageThresholds` 與全域 `confidenceThreshold` 分離
+- **F-2 (致命):** §4.8 區分 `ocrSuccessRate`（OCR 成功率）與 `runnerActivationRate`（跑者啟用率），避免混用
+- **F-3 (致命):** Photo Processing Lambda Timeout 60s → 240s（與 Cascade `globalTimeoutMs` 一致）；Face Re-ID Lambda 45s → 120s
+- **F-4 + S-1 (致命+嚴重):** §3.6 OAuth Token 完整化 — 補 DynamoDB `OAuthTokenRecord` schema、6 狀態狀態機、KMS envelope 流程、3 個 GSI 索引、跨章節關聯表
+- **M-3 (中度):** §4.8 Lambda 成本算式重算（單位更正 per GB-second，賽事日總成本 $72.65 → $16.03）
+- **S-2 (嚴重):** Threads 250 限流常數於 §2.8 / §3.9 統一引用說明（待 v1.5 抽為 config field）
+- **S-3 (嚴重):** §4.2 延遲預算表加註排除項（SQS wait / X-Ray overhead）
+- **S-4 (嚴重):** §3.5 Rate Limit 雙層優先序說明（API Gateway 為粗粒度先驗，Redis Token Bucket 為細粒度 AND 關係）
+- **S-5 (嚴重):** pushMaxPerEvent 註解加（叢集 dedup 後）+ §4.8 計算公式對照
+- **S-6 (嚴重):** 本 §0 文件關係章節（proposal.md reference-only 標記）
+
+---
+
 ## **1\. 專案概述 (Project Overview) & 核心價值**
 
 在大型路跑與馬拉松賽事中，參賽者的數位體驗已成為賽事品牌經營的核心要素。然而，傳統馬拉松賽事的影像紀錄與分發流程，長期面臨效率低落與使用者體驗不佳的技術瓶頸。
@@ -589,6 +631,8 @@ interface ISocialPlatformAdapter {
 
 **Threads 限流緩衝實作（介面層細則）：**
 
+> **常數引用說明（v1.4）：** Threads 24 小時 250 則貼文上限為**平台政策常數**，於本 SPEC 中於 §2.8.L634（介面層）、§3.9.L2302（治理層）兩處獨立陳述。為避免未來 Meta 調整限流時漏改一處，建議於下次修補（v1.5）將此常數抽為 `EventFeatureConfig.publishing.threadsHardLimitPer24h: number = 250`，並於本檔所有引用處改為 `${threadsHardLimitPer24h} × (1 - threadsRateLimitBuffer)`。
+
 - Threads 對單一 profile 滾動 24 小時 250 則貼文 + 1,000 則回覆上限(1 個 carousel 算 1 則貼文)
 - 推播引擎於 `validateBatchCompliance()` 內比對 `threadsRolling24hPostCount + 批次數量` 是否超過 `250 × (1 - threadsRateLimitBuffer)`
 - 超限任務自動延後至下個 24 小時視窗(不寫 DLQ,因屬平台政策性限制而非系統故障)
@@ -924,14 +968,33 @@ function createInferenceAdapter(
 
 #### **多引擎級聯降級（Cascade Fallback）**
 
-為同時滿足 SLA 延遲目標與成本控制，系統支援「多引擎級聯降級」策略：
+為同時滿足 SLA 延遲目標與成本控制，系統支援「多引擎級聯降級」策略。Cascade 各階段採用**獨立階段閾值（stageThresholds）**，與全域 `confidenceThreshold` (legacy, 單引擎模式) **完全分離**：
 
-1. **第一階段（≤ 30 秒）：** 嘗試本地 YOLOv8 + Tesseract OCR（免費、低延遲）
-2. **第一階段失敗（置信度 < 0.5）或超時：** 切換至 Gemini Flash API（低成本雲端 OCR）
-3. **第二階段仍失敗（置信度 < 0.7）：** 升級至 Claude 3.5 Sonnet（高精度推理）
+1. **第一階段（≤ 30 秒）：** 嘗試本地 YOLOv8 + Tesseract OCR（免費、低延遲）。**採用門檻 = `stageThresholds[0]`**（預設 0.5，較寬鬆以保留低品質本地辨識結果）
+2. **第一階段失敗（`confidence < stageThresholds[0]`）或超時：** 切換至 Gemini Flash API（低成本雲端 OCR）
+3. **第二階段仍失敗（`confidence < stageThresholds[1]`）：** 升級至 Claude 3.5 Sonnet（高精度推理）。**採用門檻 = `stageThresholds[1]`**（預設 0.7，較嚴格以僅接受高品質雲端結果）
 4. **最終失敗：** 寫入 DLQ「AI 推論耗盡」，通知人工處理
 
-每個階段的 `maxRetries`、`timeoutMs`、`fallbackOnConfidence` 皆由 `eventConfig.inferenceStrategy` 參數化控制。
+每個階段的 `maxRetries`、`timeoutMs`、`stageThresholds[i]` 皆由 `eventConfig.inferenceStrategy.cascadeFallback` 參數化控制。**重要：`stageThresholds[i]` 各階段獨立設定，不應假設與全域 `confidenceThreshold` 相同**——前者控制 Cascade 內部降級時機，後者僅在非 Cascade 模式（單引擎）下生效。
+
+```typescript
+interface CascadeConfig {
+  enabled: boolean;                        // 是否啟用 Cascade 多引擎模式（預設 true）
+  stages: CascadeStage[];                  // 各階段依序執行
+  globalTimeoutMs: number;                 // 所有階段合計的全局 timeout(預設 240000 = 4 分鐘)
+
+  // 階段閾值陣列(向後相容語法;等同於 stages[i].fallbackOnConfidence)
+  // 預設 [0.5, 0.7]，第一階段寬鬆、第二階段嚴格
+  stageThresholds?: number[];
+}
+
+interface CascadeStage {
+  engineType: string;                      // 該階段使用之引擎(如 "yolov8-tesseract", "gemini-flash", "claude-sonnet")
+  maxRetries: number;                      // 該階段內部重試次數
+  timeoutMs: number;                       // 該階段單次 timeout(毫秒)
+  fallbackOnConfidence: number;            // 該階段 confidence 低於此值時降級至下一階段
+}
+```
 
 #### **本地部署模型的管理**
 
@@ -979,9 +1042,12 @@ interface EventFeatureConfig {
     faceReIdEnabled: boolean;              // Face Re-ID Fallback 啟用（須用戶另行同意）
     inferenceEngine: string;               // 推論引擎策略（見 2.10）
     inferenceStrategy: InferenceStrategy;   // cost_optimized / latency_optimized / privacy_first / accuracy_first
-    confidenceThreshold: number;           // OCR 置信度閾值（預設 0.7）
-    faceReIdConfidenceThreshold: number;   // Face Re-ID 置信度閾值（預設 0.75）
-    cascadeFallback: CascadeConfig;        // 級聯降級設定
+    // 單引擎 OCR 結果採用門檻(legacy threshold,僅供單一引擎模式下參考)
+    // 註:Cascade 多引擎模式之下,各階段採用 cascadeFallback.stageThresholds 陣列控制
+    //   此欄位保留以維持向後相容,新部署應使用 stageThresholds
+    confidenceThreshold: number;           // 單引擎 OCR 置信度閾值(預設 0.7),僅單一引擎時生效
+    faceReIdConfidenceThreshold: number;   // Face Re-ID 置信度閾值(預設 0.75)
+    cascadeFallback: CascadeConfig;        // 級聯降級設定(多引擎模式時以 stageThresholds 為準)
   };
 
   // --- 照片美化與渲染 ---
@@ -1623,6 +1689,15 @@ Token 生命週期管理與刷新失敗處理，請參見 §3.6。
 - 若僅 Lambda 限流,DDoS 攻擊會直接打到 Lambda 啟動成本,單一攻擊事件可耗盡 account concurrency
 - 雙層組合:API Gateway 擋下大量異常 IP,Lambda Redis Token Bucket 處理「已通過身分驗證但行為異常」之細粒度限流
 
+**雙層優先序（v1.4 補充）：** 兩個限流層為 **AND 關係（兩者皆須通過才放行）**，而非「先 API Gateway 後 Redis」：
+
+| 層級 | 判定時機 | 阻擋後行為 | 是否計入另一層？ |
+|:----|:----|:----|:----|
+| **API Gateway（粗粒度）** | 請求進入 API Gateway 時（Lambda 啟動前） | 回 HTTP 429 + `RATE_LIMIT_EXCEEDED`；Lambda 不會被觸發 | ✗（請求未進入 Lambda，Redis Token Bucket 不計數） |
+| **Lambda Redis Token Bucket（細粒度）** | 請求通過 API Gateway 後，於 Lambda handler 內執行 | 推播任務延遲 30s 重入 publish-queue（見 §2.8）；下次重試若仍超限則繼續延遲 | ✓（每次成功 publish 都消耗 1 個 token） |
+
+**重要：** API Gateway 阻擋之請求**不會**被 Redis Token Bucket 計入；反之 Lambda 內 Redis 阻擋**仍會計入** API Gateway 之 Per-User / Per-IP 配額（因請求已通過 API Gateway）。**因此同一跑者若遭 API Gateway 限流，不會同步扣減其 Redis Token Bucket 額度**——兩個桶獨立運作、各自 quota。
+
 **設定檔位置：**
 - API Gateway Usage Plan — Terraform `infrastructure/modules/api-gateway/usage-plans.tf`
 - Lambda Token Bucket — `EventFeatureConfig.publishing.perRunnerRateLimit`（§2.8）
@@ -1926,20 +2001,166 @@ interface PaginatedResponse<T> {
 
 ### **3.6 OAuth Token 生命週期與刷新失敗處理**
 
-OAuth Token（Access Token + Refresh Token）之生命週期管理為系統穩定性的關鍵環節：
+OAuth Token（Access Token + Refresh Token）之生命週期管理為系統穩定性的關鍵環節。本節定義 Token 完整生命週期、DynamoDB 儲存結構、加密 envelope、與平台撤銷流程的整合。
 
-**Token 刷新邏輯：**每張 OAuth Token 均攜帶 `expiresAt` 時間戳。Lambda 函數在執行推播前，會先檢查是否已過期或距離過期不足 10 分鐘；若符合條件則先呼叫平台 Refresh Endpoint 取得新 Token，再執行推播。刷新成功後新 Token 寫回 DynamoDB，並更新 `expiresAt`。
+#### **Token 生命週期狀態機**
 
-**刷新失敗時之降級流程：**
+每張 OAuth Token 在 DynamoDB 中以下列狀態存在：
 
-| 失敗原因 | 系統行為 |
-| :---- | :---- |
-| 用戶主動撤銷授權（401 Unauthorized from platform） | 立即更新 Token 狀態為 `revoked`，**不重試**，寫入事件日誌；如跑者有備援平台（LINE），自動切換至備援推播；無備援則標記「需重新授權」並於完賽報紙中通知 |
-| Refresh Token 過期（一般為 30–60 天） | 視同撤銷處理，同上 |
-| 平台 API 暫時性錯誤（5xx） | 指數退避重試（最多 3 次，間隔 30s/60s/120s），3 次失敗後寫入 DLQ「Token 刷新重試失敗」 |
-| 網路瞬断 | 重試 1 次，失敗即寫入 DLQ |
+```
+[active] ──expires_in < 10min──> [expiring_soon]
+   │                                 │
+   │                                 ├──refresh_success──> [active] (新 expiresAt)
+   │                                 ├──refresh_401/403──> [revoked]
+   │                                 ├──refresh_410/expired──> [needs_reauth]
+   │                                 └──refresh_5xx (3 retries fail)──> [refresh_failed] (寫入 DLQ)
+   │
+   ├──user_revoke (PDPA DELETE /revoke)──> [revoked]
+   ├──admin_force_revoke (§3.8 Super Admin)──> [revoked]
+   ├──eventEndAt + 30d──> [purged] (S3 + DynamoDB 雙刪除;依 §4.3)
+   └──user_unbind (OAuth callback 解綁)──> [revoked]
+```
 
-**重新授權通知：**當 Token 狀態變更為 `needs_reauth` 時，系統透過 LINE Push Message 主動通知跑者：「您的社群授權已過期，請於 48 小時內重新授權以確保收到完賽報紙」。
+| 狀態 | 意義 | 推播可用？ | 加密儲存？ |
+|:----|:----|:----:|:----:|
+| `active` | Token 有效，距過期 > 10 分鐘 | ✓ | ✓ |
+| `expiring_soon` | 距過期 ≤ 10 分鐘，下次推播前需 refresh | ✓ (refresh 後) | ✓ |
+| `revoked` | 用戶撤銷或平台 401/403 拒絕 | ✗ | ✓ (audit 留 30 天) |
+| `needs_reauth` | Refresh Token 過期，需用戶重新 OAuth | ✗ | ✗ (已清除) |
+| `refresh_failed` | 5xx 重試耗盡，進入 DLQ 人工處理 | ✗ | ✓ |
+| `purged` | 賽事結束 30 天後或 PDPA 撤回，實體刪除 | ✗ | ✗ |
+
+#### **DynamoDB OAuthToken Schema**
+
+```typescript
+// 主表:OAuthToken (PK: runnerId+platform, SK: eventId)
+interface OAuthTokenRecord {
+  // 複合主鍵
+  runnerId: string;                        // PK part 1 — 跑者唯一 ID (UUID v4)
+  eventId: string;                         // PK part 2 — 賽事 ID (對應 §2.6 多租戶隔離)
+  platform: 'line' | 'instagram' | 'threads' | 'facebook' | 'x'; // 平台識別
+
+  // Token 本體(皆以 AES-256-GCM + KMS CMK 加密,僅 Lambda 解密後使用)
+  accessTokenEncrypted: Buffer;            // KMS-encrypted access token
+  accessTokenNonce: Buffer;                // GCM nonce (12 bytes)
+  refreshTokenEncrypted?: Buffer;          // KMS-encrypted refresh token (可選,某些平台無)
+  refreshTokenNonce?: Buffer;
+
+  // 生命週期狀態
+  status: 'active' | 'expiring_soon' | 'revoked' | 'needs_reauth' | 'refresh_failed' | 'purged';
+  expiresAt: string;                       // ISO 8601 UTC
+  issuedAt: string;                        // ISO 8601 UTC
+  lastRefreshedAt?: string;
+
+  // OAuth 平台專屬資訊
+  scope: string[];                         // 授權範圍,例 ['instagram_basic', 'instagram_content_publish']
+  platformUserId: string;                  // 平台 User ID (LINE User ID, IG Business Account ID 等)
+  linkedPageId?: string;                   // 僅 Instagram — Facebook 粉絲專頁 ID
+
+  // 加密中繼資料
+  kmsKeyId: string;                        // ARN of KMS CMK used
+  kmsKeyVersion: number;                   // KMS key version (for rotation tracking)
+  encryptionAlgorithm: 'AES-256-GCM';      // 明文標示,供解密路徑判斷
+
+  // PDPA / 稽核
+  consentId: string;                       // FK → Runner.consent.crossBorderTransferConsent (見 §3.1.X)
+  crossBorderTransferGranted: boolean;     // 是否取得跨境同意
+  createdAt: string;
+  updatedAt: string;
+  revokedAt?: string;                      // 撤銷時間(若有)
+  revokedReason?: 'user_revoke' | 'platform_401' | 'admin_force' | 'refresh_expired' | 'event_end_purge';
+
+  // TTL (DynamoDB 自動清除,僅為輔助;真正的清除走 §4.3 PDPA 流程)
+  ttl: number;                             // Unix timestamp, 預設 status='purged' 後 90 天
+}
+
+// GSI 索引(支援 §3.5 §3.5.2 LINE Webhook 流程與 §3.8 後台管理)
+interface OAuthTokenGSI {
+  // GSI1: 依平台 User ID 查詢(用於 LINE follow / Meta callback)
+  'platform-user-index': {
+    PK: `platform#${platform}#${platformUserId}`; // e.g. "platform#line#Uxxxxxxxxxxxx"
+    SK: `eventId`;
+  };
+
+  // GSI2: 依狀態 + 過期時間查詢(用於背景 refresh job 批次掃描 expiring_soon)
+  'status-expiry-index': {
+    PK: `status#${status}`;                // e.g. "status#expiring_soon"
+    SK: `expiresAt`;                       // 排序用
+  };
+
+  // GSI3: 依賽事 + 狀態查詢(用於 §3.8 後台 DLQ 顯示、§4.3 跨境副本刪除)
+  'event-status-index': {
+    PK: `eventId`;
+    SK: `status#updatedAt`;
+  };
+}
+```
+
+#### **Token 加密 Envelope 流程**
+
+```
+[1] OAuth Callback Lambda 收到 authorization code
+    ↓
+[2] 拿 code 換 access_token + refresh_token (向平台 API)
+    ↓
+[3] AWS KMS GenerateDataKey(CMK) → 取得 plaintext DEK + encrypted DEK
+    ↓
+[4] AES-256-GCM(plaintext DEK, access_token) → accessTokenEncrypted + nonce
+    ↓
+[5] 銷毀 plaintext DEK (memory only); 僅保留 encrypted DEK
+    ↓
+[6] 寫入 DynamoDB OAuthToken(accessTokenEncrypted, accessTokenNonce, kmsKeyId, kmsKeyVersion)
+    ↓
+[7] Lambda process exit; plaintext access_token 從記憶體清除
+```
+
+**KMS CMK Rotation 政策：**
+- 每場賽事建立獨立 CMK（Customer Master Key）
+- CMK 啟用 90 天後自動排程刪除（見 §2.5 L170）
+- Rotation 時 `kmsKeyVersion` 自動遞增；舊 Token 仍可用舊 version 解密，新 Token 強制使用新 version
+- 詳見 §4.3 PDPA Token 銷毀政策
+
+#### **Token 刷新邏輯**
+
+每張 OAuth Token 均攜帶 `expiresAt` 時間戳。Lambda 函數在執行推播前，會先檢查是否已過期或距離過期不足 10 分鐘；若符合條件則先呼叫平台 Refresh Endpoint 取得新 Token，再執行推播。刷新成功後新 Token 加密後寫回 DynamoDB，並更新 `expiresAt` 與 `kmsKeyVersion`。
+
+**背景刷新 Job：**
+- 觸發：EventBridge Schedule 每 5 分鐘掃描 `status-expiry-index` 中 `status='expiring_soon'` 的 Token
+- 預期 batch size：~50-200 個 / 5 min（單賽事 12,000 啟用跑者 × 3 平台 ÷ 90 天 × 5 min）
+- Concurrency：透過 SQS `token-refresh-queue` 觸發 Token Refresh Lambda（Memory 512MB, Timeout 30s）
+- Idempotency：以 `runnerId + platform + eventId` 為隱含 Idempotency Key，Conditional Write 防止 race condition
+
+#### **刷新失敗時之降級流程**
+
+| 失敗原因 | HTTP Code | 系統行為 | 後續狀態 |
+| :---- | :---- | :---- | :---- |
+| 用戶主動撤銷授權 | 401 Unauthorized | 立即更新 Token 狀態為 `revoked`，**不重試**，寫入事件日誌；如跑者有備援平台（LINE），自動切換至備援推播；無備援則標記 `needs_reauth` 並於完賽報紙中通知 | `revoked` |
+| Refresh Token 過期（一般為 30–60 天） | 400 invalid_grant | 視同撤銷處理；觸發重新授權通知（LINE Push Message） | `needs_reauth` |
+| 平台 API 暫時性錯誤 | 5xx | 指數退避重試（最多 3 次，間隔 30s/60s/120s），3 次失敗後寫入 DLQ「Token 刷新重試失敗」 | `refresh_failed` (DLQ) |
+| 網路瞬斷 | timeout / ECONNRESET | 重試 1 次，失敗即寫入 DLQ | `refresh_failed` (DLQ) |
+
+#### **重新授權通知**
+
+當 Token 狀態變更為 `needs_reauth` 時，系統透過 LINE Push Message 主動通知跑者：「您的社群授權已過期，請於 48 小時內重新授權以確保收到完賽報紙」。48 小時內未重新授權 → 完賽報紙中以「授權過期」區塊說明，照片仍寫入 Gallery 供事後手動下載（符合 §4.3 資料最小化原則）。
+
+#### **Token 撤銷對應之 PDPA 流程**
+
+當用戶呼叫 `DELETE /api/v1/races/{eventId}/runner/{bibNumber}/revoke`（§3.5）或後台 Super Admin 強制撤銷時：
+1. DynamoDB Transactional Write：`OAuthToken.status` → `revoked`、`revokedAt` = now、`revokedReason` = `user_revoke` 或 `admin_force`
+2. S3 Cross-Region Replication 刪除標記（針對海外節點副本，§4.3 PDPA §21）
+3. DynamoDB Global Tables 條件刪除（僅刪除 status='revoked' 之後的更新版本，保留 30 天 audit log）
+4. CloudTrail 寫入撤銷事件（保留 7 年，§4.3 稽核軌跡）
+5. 推播引擎下次嘗試時偵測 status='revoked' → 跳過該平台，推播其他備援平台或 fallback 至 Gallery
+
+#### **跨章節關聯**
+
+| 本節定義 | 引用之章節 |
+|:----|:----|
+| OAuthTokenRecord schema | §2.5 DynamoDB 表設計（已預留 `runner-platform-index` GSI） |
+| KMS CMK 加密 envelope | §4.3 PDPA §21 跨境傳輸合規 |
+| Token 狀態機 | §3.1.X 跨國跑者同意、§3.8 Super Admin 強制撤銷 |
+| 重新授權通知 | §3.1.Y 推播撤回機制（撤回後狀態變更需要通知） |
+| 48hr 重新授權窗口 | §4.3 完賽報紙 PDF 30 天保留政策 |
 
 ### **3.7 照片歸戶邏輯（Corner Cases）**
 
@@ -2362,18 +2583,27 @@ interface MetaAppReviewChecklist {
 | :---- | :---- | :---- |
 | Cold Start（Provisioned Concurrency 暖機） | ≤ 1 秒 | 暖機實例跳過初始化，可立即處理 SQS 訊息 |
 | Cold Start（未暖機，首次） | 5–15 秒 | 透過 Provisioned Concurrency（§4.2）規避；此情境僅發生於賽事前 5 分鐘冷啟動 |
-| Photo Processing（含 AI 推論） | ≤ 60 秒 | 由 Inference Cascade（P3 §2.10）控制；級聯降級總時長上限 240 秒 |
+| Photo Processing（含 AI 推論） | ≤ 240 秒 | 由 Inference Cascade（§2.10）控制；級聯降級總時長上限 240 秒（見 `globalTimeoutMs`，§2.10） |
 | 美化渲染（Sharp） | ≤ 5 秒 | 記憶體內 libvips 合成 |
 | Publish Lambda（含社群 API 呼叫） | ≤ 30 秒 | 含 LINE Push / IG Content Publishing 兩階段上傳 |
-| **P95 總和（暖機路徑）** | **≤ 96 秒** | 1 + 60 + 5 + 30 = 96 秒，遠低於 5 分鐘 SLA |
+| **P95 總和（暖機路徑）** | **≤ 276 秒** | 1 + 240 + 5 + 30 = 276 秒，遠低於 5 分鐘 SLA（300 秒） |
 | **P95 總和（困難場景，走完整 Fallback 鏈）** | **≤ 15 分鐘** | 滿足 `hardCapMinutes` 之 hard cap |
+
+> **排除項說明：** 以上預算**未計入**：
+> - **SQS Long Polling Wait Time** — §2.2 Receive Request Wait Time 設為 20 秒；理論上 P95 可能命中該 wait time
+> - **X-Ray SDK overhead** — 6 個 segment 建立累計 ~100-150ms
+> - **API Gateway cold start** — 首次 cold start ~300-500ms
+>
+> 完整 P95 仍穩定低於 5 分鐘 SLA，具 ~24 秒緩衝空間。
+
+**備註：** Lambda Timeout 已從 60 秒調升至 **240 秒**（詳見 §4.2 配置表），與 `globalTimeoutMs` 一致，以避免 Cascade Fallback 在第一階段尚未完成時被 AWS Lambda 硬性 timeout 中斷。Face Re-ID Lambda Timeout 從 45 秒調升至 120 秒（兩階段 Cascade）。
 
 **Lambda 函數配置表（依賽事規模 20,000 人基準）：**
 
 | 函數 | 觸發來源 | Memory | Timeout | Reserved Concurrency | Provisioned Concurrency | 冷啟動影響 |
 | :---- | :---- | :---- | :---- | :---- | :---- | :---- |
-| **Photo Processing Lambda** | SQS `photo-processing-queue` | 1024 MB | 60 秒 | 100 | 20 | 高（Cold Start 5-10s） |
-| **Face Re-ID Lambda** | SQS `face-reid-queue` | 1024 MB | 45 秒 | 15 | 5 | 中（Cold Start 3-5s） |
+| **Photo Processing Lambda** | SQS `photo-processing-queue` | 1024 MB | **240 秒** | 100 | 20 | 高（Cold Start 5-10s） |
+| **Face Re-ID Lambda** | SQS `face-reid-queue` | 1024 MB | 120 秒 | 15 | 5 | 中（Cold Start 3-5s） |
 | **Publish Lambda** | SQS `publish-queue` | 512 MB | 30 秒 | 30 | 5 | 低（Cold Start 1-2s） |
 | **PDF Generation Lambda** | SQS `pdf-generation-queue` | 2048 MB | 120 秒 | 20 | 10 | 極高（Cold Start 8-15s，Headless Chromium 啟動） |
 | **Callback Lambda**（OAuth） | API Gateway | 512 MB | 15 秒 | 10 | 0 | 低 |
@@ -2552,29 +2782,49 @@ Face Re-ID 為選配功能，跑者於註冊時自願上傳清晰自拍照作為
 - **S3 儲存週期** — 原始 30 天 + 處理圖 90 天;若調整須重算儲存費用
 - **AI API 費用** — 採「延遲優先」策略（Gemini Flash）之估算;若採「成本優先」本地模型則 AI 費用為 0,僅計 GPU 硬體折舊
 
+**兩類啟用率假設（嚴格區分，不可混用）：**
+
+| 變數 | 預設值 | 定義 | 影響之費用項目 |
+|:----|:----:|:----|:----|
+| `ocrSuccessRate`（OCR 成功率） | 60% | 進站照片中可被 AI 識別出有效 `bibNumber` 之比例 | AI API 費用（每張被處理之照片皆需呼叫一次 AI） |
+| `runnerActivationRate`（跑者啟用率） | 60% | 已報名跑者中完成 OAuth 授權並成功綁定至少一個社群平台之比例 | LINE/IG/Threads 推播費用（每位啟用跑者最多 `pushMaxPerEvent` 張推播） |
+
+**重要：此兩變數各自獨立，數值可能不同。** 典型情境：OCR 成功率 70% 但跑者啟用率僅 35%（許多跑者未完成 OAuth）。下表所有 LINE/IG/Threads 推播費用計算以 `runnerActivationRate` 為基準；AI API 費用以 `ocrSuccessRate` 為基準。
+
 #### **LINE 官方帳號費用（台灣賽事必備）**
 
 | 方案 | 費用 | Push Message 上限 | 適用場景 |
 | :---- | :---- | :---- | :---- |
 | 輕用量（Light） | NT$0 / 月 | 200 則/月 | 測試環境、小型賽事（< 200 推播） |
-| 中用量（Standard） | NT$800 / 月 | 3,000 則/月 | 5,000 人賽事（假設 15% 啟用） |
-| 高用量（Pro） | NT$1,200 / 月 | 6,000 則/月 | 20,000 人賽事（假設 25% 啟用） |
+| 中用量（Standard） | NT$800 / 月 | 3,000 則/月 | 5,000 人賽事（假設 35% 啟用率 × 3 張 = 5,250 則） |
+| 高用量（Pro） | NT$1,200 / 月 | 6,000 則/月 | 20,000 人賽事（假設 25% 啟用率 × 3 張 = 15,000 則，不足；須加購） |
 | 無限制（Premium） | NT$15,000 / 月 | 無上限 | 大型賽事或多場次賽事主辦方；高用量加購每則 NT$0.2 起 |
 
-> **Note：** 20,000 人賽事若 60% 啟用（約 12,000 跑者），每人 3 張照片 = 36,000 則 Push，中用量（3,000）與高用量（6,000）均不足，須使用無限制方案（NT$15,000/月）或高用量方案搭配加購訊息。費用以 LINE 官方公告為準，本表於 2026 上半年之計價版本彙整。
+> **Note：** 上述方案容量對照假設：20,000 人賽事若 `runnerActivationRate=60%`（12,000 啟用跑者，詳見 §4.8 兩類啟用率假設表），每人 `pushMaxPerEvent=5` 張 = 60,000 則 Push 上限 — 此為**推播上限**，實際推播張數由 §3.1.Y 推播偏好設定與 §3.7 Cluster dedup 後的最終張數決定。中用量（3,000）與高用量（6,000）方案均明顯不足，建議直接採用無限制方案（NT$15,000/月）或高用量搭配加購訊息。費用以 LINE 官方公告為準，本表於 2026 上半年之計價版本彙整。
+
+**§4.8 推播張數 vs §3.1.Y pushMaxPerEvent 對照：**
+- `pushMaxPerEvent=5`（預設）= 叢集 dedup **後** 對單一跑者的最終推播張數上限（詳見 §3.7）
+- LINE 方案容量計算 = `eventParticipants × runnerActivationRate × pushMaxPerEvent`，**非** `eventParticipants × ocrSuccessRate`
+- 跑者啟用率與 OCR 成功率為不同概念，詳見 §4.8 假設表；不得混用
 
 #### **AWS 運行成本（20,000 人賽事，單日 8 小時）**
 
-| 元件 | 估算用量 | 單價 | 估算費用（USD） |
-| :---- | :---- | :---- | :----: |
-| **Lambda（照片處理）** | 60,000 次調用 × 3s avg | $0.0000166667 / 100ms | ~$30 |
-| **Lambda（推播引擎）** | 36,000 次調用 × 1s avg | $0.0000166667 / 100ms | ~$6 |
-| **Lambda（PDF 生成）** | 12,000 次 × 15s avg | $0.0000166667 / 100ms | ~$30 |
-| **S3 儲存** | 原始圖 200 GB + 處理圖 50 GB | $0.023 / GB | ~$5.75 |
-| **SQS** | 60,000 訊息 | $0.40 / 百萬訊息 | ~$0.024 |
-| **DynamoDB** | 80,000 Write + 20,000 Read（On-Demand 模式） | $1.25 / 百萬 WCU + $0.25 / 百萬 RCU | ~$0.000105 |
-| **CloudFront CDN** | 100 GB 流出 | $0.0085 / GB | ~$0.85 |
-| **合計（不含 AI API）** | | | **~$72.65 / 賽事日** |
+> **算式說明：** AWS Lambda 計價單位為 **$0.0000166667 per GB-second**（即 $16.67 per 1M GB-s）。計算公式：
+> `cost = calls × avgDurationSec × memoryGB × $0.0000166667`
+> 以下數字依此公式重新計算，**先前的 $30/$6/$30 為單位誤判（per 100ms 而非 per second），已更正**。
+
+| 元件 | 估算用量 | 單價 | 估算費用（USD） | 算式 |
+| :---- | :---- | :---- | :----: | :---- |
+| **Lambda（照片處理）** | 60,000 次調用 × 3s avg × 1 GB（1024 MB） | $0.0000166667 / GB-s | **~$3.00** | 60,000 × 3 × 1 × 0.0000166667 |
+| **Lambda（推播引擎）** | 36,000 次調用 × 1s avg × 0.5 GB（512 MB） | $0.0000166667 / GB-s | **~$0.30** | 36,000 × 1 × 0.5 × 0.0000166667 |
+| **Lambda（PDF 生成）** | 12,000 次 × 15s avg × 2 GB（2048 MB） | $0.0000166667 / GB-s | **~$6.00** | 12,000 × 15 × 2 × 0.0000166667 |
+| **S3 儲存** | 原始圖 200 GB + 處理圖 50 GB | $0.023 / GB | ~$5.75 | (200 + 50) × 0.023 |
+| **SQS** | 60,000 訊息 | $0.40 / 百萬訊息 | ~$0.024 | 60,000 × 0.40 / 1,000,000 |
+| **DynamoDB** | 80,000 Write + 20,000 Read（On-Demand 模式） | $1.25 / 百萬 WCU + $0.25 / 百萬 RCU | ~$0.105 | 80,000 × 1.25 / 1M + 20,000 × 0.25 / 1M |
+| **CloudFront CDN** | 100 GB 流出 | $0.0085 / GB | ~$0.85 | 100 × 0.0085 |
+| **合計（不含 AI API）** | | | **~$16.03 / 賽事日** | |
+
+**修正說明：** 原文件估算 `~$72.65`，係將單價單位誤判為「per 100ms」（即 $0.0000166667/0.1s = $0.000166667/GB-s）所致，相差 10 倍。更正後 Lambda 總額從 $66 → $9.30，賽事日總成本從 $72.65 → $16.03。AI API 費用（§4.8 末段表格）不受此影響，仍維持原估算。
 
 #### **AI API 成本（最大變異項）**
 
