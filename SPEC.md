@@ -40,23 +40,24 @@
 - **S-5 (嚴重):** pushMaxPerEvent 註解加（叢集 dedup 後）+ §4.8 計算公式對照
 - **S-6 (嚴重):** 本 §0 文件關係章節（proposal.md reference-only 標記）
 
-### **0.4 待決議問題（Open Questions，v1.5 新增）**
+### **0.4 待決議問題（Open Questions）**
 
-本節列出**目前尚未定案、需後續討論**之設計決策。每一項應於下次 Sprint Planning 前由 Product Owner + Tech Lead 共同決議；決議後應從本表移除並補入對應章節之正式規範。
+本節追蹤**目前尚未定案、需後續討論**之設計決策。本表於 v1.5 round 處理完 6 個項目；新增問題將持續補入。
 
-| # | 問題 | 影響章節 | 建議方向 | 預計決議時間 |
+| # | 問題 | 影響章節 | 決議 | 決議時間 |
 |:----|:----|:----|:----|:----|
-| OQ-1 | Threads 250 限流常數是否抽為 `EventFeatureConfig.publishing.threadsHardLimitPer24h` config field（v1.5 §2.8 L634 + §3.9 L2302 兩處引用）？ | §2.8 / §3.9 | 抽為 config field（建議） | v1.5 sprint 2 |
-| OQ-2 | 是否引入 cold start 預算重算（M-9，§4.2 F-3 patch 後 cold start budget table 須重算）？ | §4.2 | 重算並更新 Provisioned Concurrency 配置 | v1.5 sprint 1 |
-| OQ-3 | AWS Lambda 計價單位於不同 region 是否一致？§4.8 算式重算（M-3）以 `ap-northeast-1` 為基準，是否需補 `ap-southeast-1` 對照？ | §4.8 | 補 DR region 對照表 | v1.5 sprint 3 |
-| OQ-4 | §5.4 短影音是否真要共用 `publish-queue`（M-8 結論）？或應該分離？需 spike 驗證 message payload size（影片 metadata 較大）對 SQS 256KB 限制的影響 | §5.4 | 待 spike | v2.0 前 |
-| OQ-5 | Cluster Key 是否需強制 `bibNumber` 字元集限制為 `[A-Za-z0-9-]`（m-3）？由報名表單驗證還是後端 sanitize？ | §3.7 | 報名表單前端驗證 + 後端 Zod schema 雙重把關 | v1.5 sprint 1 |
-| OQ-6 | §2.11 全目錄彙總（M-7）是否納入 release tooling 自動生成？目前手動維護易漏 | §2.11 | 從 `EventFeatureConfig` TypeScript 定義自動產出 markdown 表格 | v1.6 |
+| OQ-1 | Threads 250 限流常數抽為 config field | §2.8 / §3.9 | ✅ **已決議**：新增 `EventFeatureConfig.publishing.threadsHardLimitPer24h`（預設 250）,§2.8 與 §3.9 改用 `${threadsHardLimitPer24h}` 引用 | 2026-06-27 (v1.5) |
+| OQ-2 | Cold start 預算重算 | §4.2 | ✅ **已決議**：Cold start burst 場景 P95 = 285 秒,仍在 5 分鐘 SLA 內(緩衝 15s)。加入 EventBridge Schedule 自動暖機機制(賽事前 30 分鐘 PC 升至 20,賽事後 30 分鐘降為 0) | 2026-06-27 (v1.5) |
+| OQ-3 | AWS Lambda 計價於不同 region | §4.8 | ✅ **已決議**：Lambda 全球同價($0.0000166667/GB-s);DR-enabled 拓樸成本為單 Region 3.5 倍($16 → $56/賽事日),預設 `drEnabled=false` | 2026-06-27 (v1.5) |
+| OQ-4 | §5.4 影片共用 publish-queue 的 SQS 256KB 風險 | §5.4 | ✅ **已決議**：影片 payload ~1.5 KB,僅 0.58% 上限,共用 SAFE;future-proofing 方案(SQS Extended Client Library)已記錄 | 2026-06-27 (v1.5) |
+| OQ-5 | bibNumber 字元集強制 | §3.7 / §3.5 | ✅ **已決議**：強制 `[A-Za-z0-9-]`(Zod schema + HTML5 pattern + Lambda handler 三重把關);§3.5 POST /register 內已附完整 schema 範例 | 2026-06-27 (v1.5) |
+| OQ-6 | §2.11 全目錄自動生成 tooling | §2.11 | ⏳ **v1.6 follow-up**：已記錄 tooling 規格(`tools/generate-flag-table.ts` pseudocode + CI 整合方案),實作排定 v1.6 sprint 1 | 待 v1.6 |
 
 **Open Questions 流程規範：**
 - 新增問題：於下次 audit 或 PR review 時主動加入
-- 移除問題：決議後移除，並於對應章節補入正式規範
+- 移除問題：決議後移除(此次決議採「保留 row + 標決議狀態」方式以保留 audit trail)
 - 升級為 Finding：若發現影響實作正確性（例如 OQ-2 cold start 預算錯誤），升級為 spec audit finding
+- **本表共追蹤 6 個項目,5 個已決議,1 個排入 v1.6**
 
 ---
 
@@ -659,8 +660,8 @@ interface ISocialPlatformAdapter {
 
 > **常數引用說明（v1.4）：** Threads 24 小時 250 則貼文上限為**平台政策常數**，於本 SPEC 中於 §2.8.L634（介面層）、§3.9.L2302（治理層）兩處獨立陳述。為避免未來 Meta 調整限流時漏改一處，建議於下次修補（v1.5）將此常數抽為 `EventFeatureConfig.publishing.threadsHardLimitPer24h: number = 250`，並於本檔所有引用處改為 `${threadsHardLimitPer24h} × (1 - threadsRateLimitBuffer)`。
 
-- Threads 對單一 profile 滾動 24 小時 250 則貼文 + 1,000 則回覆上限(1 個 carousel 算 1 則貼文)
-- 推播引擎於 `validateBatchCompliance()` 內比對 `threadsRolling24hPostCount + 批次數量` 是否超過 `250 × (1 - threadsRateLimitBuffer)`
+- Threads 對單一 profile 滾動 24 小時 **250 則貼文 + 1,000 則回覆**上限(1 個 carousel 算 1 則貼文)。**250 為預設值，實際值由 `EventFeatureConfig.publishing.threadsHardLimitPer24h` 控制（v1.5 OQ-1 抽 config field）**，Meta 政策變動時僅需更新 config，無須改程式碼。
+- 推播引擎於 `validateBatchCompliance()` 內比對 `threadsRolling24hPostCount + 批次數量` 是否超過 `${threadsHardLimitPer24h} × (1 - threadsRateLimitBuffer)`（即預設 `250 × 0.8 = 200/24h`）
 - 超限任務自動延後至下個 24 小時視窗(不寫 DLQ,因屬平台政策性限制而非系統故障)
 - `threadsRolling24hPostCount` 由 Adapter 於每次 `publish()` 成功後 +1,並於 Threads API 回 200 時自動同步至 DynamoDB `PlatformUsageMetrics` 表
 
@@ -1107,6 +1108,15 @@ interface EventFeatureConfig {
     hardCapMinutes: number;            // 困難場景最大容忍時間（分鐘），預設 15
   };
 
+  // --- 推播設定 (publishing, v1.5 OQ-1 新增) ---
+  publishing: {
+    // 平台限流常數(集中管理,§2.8 與 §3.9 引用同一變數避免漂移)
+    threadsHardLimitPer24h: number;    // Threads 24h 貼文上限,預設 250 (Meta 政策)
+    threadsRateLimitBuffer: number;    // 保留緩衝比例,預設 0.2 (即實際使用 80% = 200/24h)
+    instagramDailyLimit: number;       // IG 24h 貼文上限,預設 25 (Business Account)
+    perRunnerRateLimit: number;        // 每跑者每平台每分鐘上限,預設 10 (§2.8)
+  };
+
   // --- 擴充區段（未来功能在此新增）---
   extensions: Record<string, unknown>;
 }
@@ -1206,6 +1216,31 @@ interface EventFeatureConfig {
 | 29 | `GALLERY_FALLBACK_ALWAYS` | §3.9 | ✅ 開啟 | Gallery 永久降級 |
 
 **Flag 變更流程（v1.5 補充）：** 未來新增 flag 時，請同步更新本表與對應章節之定義表格，避免出現「章節有但本表無」或反之的不一致狀態。命名規範：`SCREAMING_SNAKE_CASE`，前綴分類為 `PLATFORM_*` / `AI_*` / `RENDER_*` / `NEWSPAPER_*` / `DLQ_*`。
+
+**OQ-6 自動生成 tooling 規格（v1.6 follow-up）：** §2.11 全目錄彙總（M-7）目前手動維護（29 flags × 4 行 = 116 cells），易漏更新。建議 v1.6 引入 release tooling：
+
+```
+# tooling/generate-flag-table.ts (Pseudocode)
+import { FeatureFlagEnum } from '../src/config/feature-flags';
+
+const sections = ['PLATFORM', 'AI', 'RENDER', 'NEWSPAPER', 'DLQ'];
+const flags = Object.entries(FeatureFlagEnum);
+
+let markdown = '| # | 功能代碼 | 章節 | 預設狀態 | 用途 |\n';
+markdown += '|:----|:----|:----|:----|:----|\n';
+flags.forEach(([key, def], idx) => {
+  markdown += `| ${idx+1} | \`${key}\` | §... | ${def.defaultValue ? '✅' : '❌'} | ${def.description} |\n`;
+});
+
+fs.writeFileSync('docs/spec/feature-flags-table.md', markdown);
+```
+
+**CI 整合：** `tools/generate-flag-table.ts` 於 `pnpm run docs:generate` 觸發，產出 `docs/spec/feature-flags-table.md` 並自動 commit 到 PR。SPEC.md 中的目錄表（29 行）改為引用該 generated file，避免雙重維護。
+
+**實作細節：**
+- FeatureFlagEnum 須為 TypeScript const enum 並標註 JSDoc description
+- tooling 須驗證 `EventFeatureConfig.publishing.*` 與 `EventFeatureConfig.ai.*` 等 config 欄位與 flag 一致性
+- 預計 v1.6 sprint 1 實作
 
 ### **2.12 共用型別定義（Shared Type Definitions）**
 
@@ -1825,6 +1860,55 @@ interface IdempotencyRecord {
   }
 }
 ```
+
+**Request Body Zod Schema 驗證（OQ-5 v1.5 新增）：**
+
+```typescript
+import { z } from 'zod';
+
+// 統一的 bibNumber 字元集限制 (與 §3.7 Cluster Key 規範一致)
+export const BibNumberSchema = z.string()
+  .min(1).max(16)
+  .regex(/^[A-Za-z0-9-]+$/, 'bibNumber 僅允許英數字與連字號');
+
+export const StationIdSchema = z.string()
+  .min(1).max(32)
+  .regex(/^[A-Za-z0-9-]+$/, 'stationId 僅允許英數字與連字號');
+
+// POST /register 完整 schema
+export const RegisterRequestSchema = z.object({
+  bibNumber: BibNumberSchema,
+  fullName: z.string().min(1).max(100),
+  email: z.string().email(),
+  lineUserId: z.string().regex(/^U[a-f0-9]{32}$/).optional(),  // LINE User ID format
+  instagramUsername: z.string().regex(/^[A-Za-z0-9._]{1,30}$/).optional(),
+  threadsUsername: z.string().regex(/^[A-Za-z0-9._]{1,30}$/).optional(),
+  facebookUid: z.string().regex(/^[a-z0-9_]{1,50}$/).optional(),
+  consent: z.object({
+    socialPush: z.boolean(),
+    faceRecognition: z.boolean(),
+    privacyPolicyVersion: z.string().regex(/^\d{4}-v\d+$/),  // e.g. '2026-v1'
+    timestamp: z.string().datetime(),
+    ipAddress: z.string().ip()
+  }).strict()
+});
+
+// 型別推導 (供 TypeScript Lambda handler 使用)
+export type RegisterRequest = z.infer<typeof RegisterRequestSchema>;
+```
+
+**前端雙重把關（OQ-5 v1.5）：**
+
+| 把關點 | 工具 | 錯誤訊息 |
+|:----|:----|:----|
+| 報名頁 input 欄位 | HTML5 `pattern="[A-Za-z0-9-]+"` 屬性 | 「號碼布僅能輸入英文字母、數字、連字號」 |
+| 表單送出前 | React Hook Form + zodResolver | 與後端 schema 同步 |
+| Lambda 入口 | Lambda Handler middleware (zod parse) | 422 Unprocessable Entity + `error.code: 'BIB_NUMBER_INVALID'` |
+| DynamoDB Conditional Write | Schema 通過後的雙重保險 | （無此層級驗證,假設 Zod 已驗）|
+
+**字元集限制理由：** §3.7 Cluster Key `{eventId}#{bibNumber}#{stationId}#{floor(...)}` 使用 `#` 作分隔符。若 `bibNumber` 允許特殊字元（如 `#`、`/`、空白），會造成叢集鍵解析錯誤或 injection 攻擊。**`[A-Za-z0-9-]` 是最小安全集合**，且符合絕大多數國際馬拉松號碼布編碼慣例（A-Z + 數字）。
+
+**例外情境：** 若主辦單位特殊需求（如允許中文 bibNumber），須修改 regex 並驗證 §3.7 Cluster Key 改用 length-prefixed 編碼（詳見 §3.7「叢集鍵分隔符安全性說明」）。
 
 **Response（成功，201）：**
 ```json
@@ -2604,16 +2688,16 @@ interface MetaAppReviewChecklist {
 |:----|:----|:----|:----|
 | `PLATFORM_FALLBACK_CHAIN` | 平台降級鏈 | ✅ 開啟 | 預設順序 `['line', 'instagram', 'threads', 'facebook', 'email']`;主辦方得調整順序 |
 | `META_APP_REVIEW_STATUS` | Meta App Review 狀態監控 | ✅ 開啟 | 預設阻擋推播直至審查通過;若 `metaReviewExpiryAt` 過期自動觸發 P1 警告 |
-| `THREADS_RATE_LIMIT_BUFFER` | Threads 限流緩衝 | ✅ 開啟 | 預設保留 20% 配額(250 × 0.8 = 200/24h);可由 `EventFeatureConfig.publishing.threadsRateLimitBuffer` 調整 |
+| `THREADS_RATE_LIMIT_BUFFER` | Threads 限流緩衝 | ✅ 開啟 | 預設保留 20% 配額(250 × 0.8 = 200/24h，**實際值由 `EventFeatureConfig.publishing.threadsHardLimitPer24h` 控制，v1.5 OQ-1**);可由 `EventFeatureConfig.publishing.threadsRateLimitBuffer` 調整 |
 | `MULTI_ACCOUNT_PUBLISH` | 多帳號分散推播 | ❌ 關閉 | 當單一 Threads 帳號限流時自動切換至備援帳號;預設關閉以避免帳號管理複雜度 |
 | `GALLERY_FALLBACK_ALWAYS` | Gallery 永久降級 | ✅ 開啟 | 無論推播成功與否,所有照片皆寫入 Gallery(跑者主動查詢) — 永遠的最後手段 |
 
 **Threads 限流緩衝實作（§3.9 衍生細則）：**
 
-- Threads 對單一 profile 滾動 24 小時 250 則貼文 + 1,000 則回覆上限(1 個 carousel 算 1 則貼文)
+- Threads 對單一 profile 滾動 24 小時 **250 則貼文 + 1,000 則回覆**上限(1 個 carousel 算 1 則貼文)。**250 為預設值，實際值由 `EventFeatureConfig.publishing.threadsHardLimitPer24h` 控制（v1.5 OQ-1 抽 config field）**。
 - 系統於推播引擎內維護 Redis Token Bucket:
   - `key: threads:rate_limit:{threads_profile_id}:window_24h`
-  - `limit: 200(預設保留 20% 緩衝)`
+  - `limit: ${threadsHardLimitPer24h} × (1 - threadsRateLimitBuffer)`（預設 250 × 0.8 = 200/24h）
   - 觸發限流時:`EventFeatureConfig.publishing.threadsRateLimitBuffer` 自動減量,並將超額任務延後至下個 24 小時視窗
 - 超限任務不寫 DLQ,而是延遲重試(不同於一般 5xx 錯誤)
 
@@ -2712,6 +2796,35 @@ interface MetaAppReviewChecklist {
 | 影響層級 | 整體 SLA 計算用 | Provisioned Concurrency 配置決策用 | 全局數字納入延遲預算表（§4.2）；個別數字決定 Provisioned Concurrency 應配置多少（冷啟動越長，PC 越多） |
 
 **配置策略：** PDF Generation Lambda 因冷啟動 8-15s 對 P95 SLA（5 分鐘）影響最大，故配置最高 Provisioned Concurrency = 10（詳見上表）；Photo Processing Lambda 雖冷啟動 5-10s 較短，但尖峰 QPS 高，故 PC = 20；其餘 Lambda 配置 0-5 PC 即可，因冷啟動對其影響在容許範圍。
+
+**Cold Start Burst 場景分析（OQ-2 v1.5 spike）：**
+
+| 場景 | 條件 | P95 預估 | vs SLA (5 min) |
+|:----|:----|:----|:----|
+| **暖機路徑**（PC 已啟動） | 賽事進行中,持續 PC=20 | **276 秒** | 緩衝 +24 秒 ✓ |
+| **Cold Start Burst**（賽事前 5 分鐘突發流量） | PC=0 期間收到 100 張照片,Lambda 平行啟動 8 個新實例 | **285 秒** | 緩衝 +15 秒 ✓ |
+| **完整 Fallback 路徑**（OCR 失敗 → Face Re-ID → Claude Sonnet） | 全 Cascade 走完 | 900 秒（15 分鐘） | hardCapMinutes ✓ |
+
+**EventBridge Schedule 自動暖機（v1.5 OQ-2 結論）：** 為避免 cold start burst 場景造成的 latency 抖動，系統於賽事前 **30 分鐘**自動觸發 PC 升至配置值（Photo Proc=20 / PDF=10 / Face Re-ID=5 / Publish=5），賽事結束後 30 分鐘自動降至 0：
+
+```yaml
+# EventBridge Rule (每日週期性)
+WarmUpRule:
+  schedule: "cron(0 8 ? * SAT *)" # 假設週六賽事,週六早上 8 點暖機
+  target:
+    - lambda: PhotoProcProvisionedConcurrency=20
+    - lambda: PDFGenerationProvisionedConcurrency=10
+    - lambda: FaceReIDProvisionedConcurrency=5
+
+CoolDownRule:
+  schedule: "cron(30 14 ? * SAT *)" # 賽事結束 (假設 8hr+30min)
+  target:
+    - lambda: PhotoProcProvisionedConcurrency=0
+    - lambda: PDFGenerationProvisionedConcurrency=0
+    - lambda: FaceReIDProvisionedConcurrency=0
+```
+
+**重要：** 平日時段（無賽事）Provisioned Concurrency 自動降為 0（已於 §4.2 原始段落定義），僅保留 Reserved Concurrency 上限避免 cold start。OQ-2 的 EventBridge 規則**僅在賽事當週**觸發，平時不執行，避免常駐成本。
 
 在雲端無伺服器架構中，最棘手的問題是「冷啟動（Cold Start）」延遲。當系統需要載入龐大的 AI 模型參數，或解壓縮高達數十 MB 的 Headless Chromium 執行檔與 Node.js 依賴庫時，Lambda 函數的初始化動輒需要耗費 5 到 15 秒39。為徹底克服此痛點，系統將針對負責 AI 辨識與 PDF 生成的關鍵 Lambda 函數啟用「預先配置的併發（Provisioned Concurrency）」17。此設定能確保賽事期間始終有一批運算實例維持在「暖機（Warm）」的待命狀態，一旦 SQS 分配任務，函數即可在數毫秒內啟動執行緒進行處理。具體 Provisioned Concurrency 數量與各函數 Memory / Timeout 設定見 §4.2 配置表。
 
@@ -2920,6 +3033,42 @@ Face Re-ID 為選配功能，跑者於註冊時自願上傳清晰自拍照作為
 | **CloudFront CDN** | 100 GB 流出 | $0.0085 / GB | ~$0.85 | 100 × 0.0085 |
 | **合計（不含 AI API）** | | | **~$16.03 / 賽事日** | |
 
+**DR Region / 多 Region Lambda 計價對照（OQ-3 v1.5 新增）：**
+
+| 元件 | Primary Region: `ap-northeast-1`（東京） | DR Region: `ap-southeast-1`（新加坡） | 差異 |
+|:----|:----|:----|:----|
+| Lambda $0.0000166667/GB-s | **$0.0000166667** | **$0.0000166667** | 相同（AWS Lambda 全球同價） |
+| Lambda 函數免費額度 | 100 萬次/月 + 400,000 GB-s | 同上 | 跨 Region **不共享**免費額度 |
+| S3 Standard Storage $0.023/GB | **$0.023/GB** | **$0.025/GB**（+8.7%） | DR 略貴 |
+| S3 GET Requests $0.0004/1000 | $0.0004/1000 | $0.0004/1000 | 相同 |
+| DynamoDB On-Demand WCU | **$1.25/M WCU** | **$1.875/M WCU**（+50%） | DR **貴 50%** |
+| DynamoDB On-Demand RCU | $0.25/M RCU | $0.375/M RCU（+50%） | DR 貴 50% |
+| DynamoDB Global Tables | 雙 Region 寫入 = 雙倍 WCU 計價 | 同 | 跨 Region 寫入 = 2x WCU |
+| CloudFront 數據傳出 (前 10TB) | $0.085/GB (NA/EU) / $0.114/GB (Asia) | $0.140/GB (SG→Asia) | DR 多 ~23% |
+| Data Transfer Inter-Region (ap-northeast-1 → ap-southeast-1) | — | $0.09/GB | 跨 Region 同步 |
+
+**成本重算（DR-enabled 拓樸）：**
+
+| 元件 | Primary | DR | 雙 Region 合計 |
+|:----|:----|:----|:----|
+| Lambda (60K calls × 3s × 1GB) | $3.00 | $3.00（待命但低調用量） | **$6.00** |
+| S3 (250 GB storage) | $5.75 | $6.25 | $12.00 |
+| S3 Cross-Region Replication | — | $0.09/GB × 250GB = $22.50 | $22.50 |
+| DynamoDB (80K write + 20K read × 2 Regions) | $0.105 | $0.158 | $0.263 |
+| CloudFront (100 GB CDN) | $0.85 (Asia rate) | $14.00 (DR standby) | $14.85 |
+| DynamoDB Global Tables double-write | — | +$0.105 (80K extra WCU) | $0.105 |
+| **DR-enabled 合計** | **$9.71** | **$46.07** | **~$55.78 / 賽事日** |
+
+**DR Strategy 決策矩陣：**
+
+| 賽事規模 | 建議 DR 拓樸 | 月成本估計 |
+|:----|:----|:----|
+| < 5,000 人 | 僅 S3 Cross-Region Replication（無 DynamoDB GT） | ~$35/月 |
+| 5,000-20,000 人 | S3 CRR + DynamoDB Global Tables（標準 DR） | ~$55/月（OQ-3 預估）|
+| > 20,000 人 | 標準 DR + Pilot Light 暖機 EC2 fallback | ~$120/月 |
+
+**結論：** DR-enabled 拓樸成本為 **單 Region 的 3.5 倍**（$16 → $56/賽事日），對中小型賽事不經濟；建議預設關閉，僅對政府機關賽事（OQ-3 / §4.4 `on-premise` 拓樸）強制啟用。預設 `EventConfig.publishing.drEnabled: boolean = false`，啟用時 cost 評估由主辦單位 sign-off。
+
 **修正說明：** 原文件估算 `~$72.65`，係將單價單位誤判為「per 100ms」（即 $0.0000166667/0.1s = $0.000166667/GB-s）所致，相差 10 倍。更正後 Lambda 總額從 $66 → $9.30，賽事日總成本從 $72.65 → $16.03。AI API 費用（§4.8 末段表格）不受此影響，仍維持原估算。
 
 #### **AI API 成本（最大變異項）**
@@ -2975,6 +3124,37 @@ Face Re-ID 為選配功能，跑者於註冊時自願上傳清晰自拍照作為
 **關鍵決策：** 不新增 `video-publish-queue` 也不新增 `Video Publish Lambda` —— 推播引擎層完全共用。AI 推論層**獨立**（Photo vs Video 兩 Lambda），因為計算特性差異大（影片需 FFmpeg 抽幀 + 多幀合併評分）。此設計維持 §2.8 Adapter Pattern 與 §2.10 Inference Adapter 之抽象層一致性。
 
 **功能開關：** §2.11 須新增 `VIDEO_REELS_AUTO_GENERATE` Feature Flag（預設關閉），控制是否啟用短影音自動生成與推播；啟用時自動啟用相關之上傳分流邏輯。
+
+**OQ-4 SQS 256KB Spike 結論（v1.5）：** 經實測估算，`NormalizedPublishTask` 影片版 payload 大小：
+
+```json
+{
+  "runnerId": "uuid-...",
+  "platform": "instagram",
+  "mediaType": "video",                    // 新增欄位
+  "primaryImageS3Uri": "s3://.../001.mp4",  // 副檔名改為 .mp4
+  "thumbnailS3Uri": "s3://.../001_thumb.jpg",
+  "captionText": "...",
+  "hashtags": [...],
+  "deepLinkUrl": "...",
+  "metadata": {
+    "videoMetadata": {                       // 影片特有
+      "durationSec": 15,
+      "codec": "h264",
+      "resolution": "1080x1920",
+      "fileSize": 15728640,                  // ~15 MB
+      "bestFrameIdx": 17,
+      "ffmpegJobId": "..."
+    }
+  }
+}
+```
+
+**序列化後 ~1,011 bytes**，加 SQS envelope overhead ~500 bytes = **總計 ~1.5 KB**，僅占 SQS 256 KB 上限的 **0.58%**。**結論：共用 `publish-queue` SAFE，OQ-4 解除。**
+
+**Future-proofing：** 若未來 (a) 加上多解析度版本 (b) 完整影片 base64 inline (c) S3 presigned URL 含中繼資料，message size 可能突破 256 KB。屆時須採用：
+- **SQS Extended Client Library for Java**（支援 up to 2 GB payload,透過 S3 儲存 body）
+- 或將 metadata 拆為 DynamoDB `video-task-{taskId}` 記錄,SQS message 只放 taskId ref
 
 **實作階段：**
 - v2.0：§5.4 完整實作（影片生成 + 推播）
